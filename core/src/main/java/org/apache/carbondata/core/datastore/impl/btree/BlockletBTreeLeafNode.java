@@ -43,6 +43,11 @@ public class BlockletBTreeLeafNode extends AbstractBTreeLeafNode {
   private MeasureColumnChunkReader measureColumnChunkReader;
 
   /**
+   * number of pages in blocklet
+   */
+  private int numberOfPages;
+
+  /**
    * Create a leaf node
    *
    * @param builderInfos builder infos which have required metadata to create a leaf node
@@ -75,6 +80,8 @@ public class BlockletBTreeLeafNode extends AbstractBTreeLeafNode {
             builderInfos.getFooterList().get(0).getBlockletList().get(leafIndex),
             builderInfos.getFooterList().get(0).getBlockInfo().getTableBlockInfo().getFilePath());
     this.nodeNumber = nodeNumber;
+    this.numberOfPages =
+        builderInfos.getFooterList().get(0).getBlockletList().get(leafIndex).getNumberOfPages();
   }
 
   /**
@@ -96,8 +103,8 @@ public class BlockletBTreeLeafNode extends AbstractBTreeLeafNode {
    * @param blockIndex block index to be read
    * @return dimension data chunk
    */
-  @Override public DimensionRawColumnChunk getDimensionChunk(FileHolder fileReader,
-      int blockIndex) throws IOException {
+  @Override public DimensionRawColumnChunk getDimensionChunk(FileHolder fileReader, int blockIndex)
+      throws IOException {
     return dimensionChunksReader.readRawDimensionChunk(fileReader, blockIndex);
   }
 
@@ -123,5 +130,12 @@ public class BlockletBTreeLeafNode extends AbstractBTreeLeafNode {
   @Override public MeasureRawColumnChunk getMeasureChunk(FileHolder fileReader, int blockIndex)
       throws IOException {
     return measureColumnChunkReader.readRawMeasureChunk(fileReader, blockIndex);
+  }
+
+  /**
+   * @return the number of pages in blocklet
+   */
+  @Override public int numberOfPages() {
+    return numberOfPages;
   }
 }

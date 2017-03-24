@@ -54,6 +54,8 @@ import org.apache.carbondata.format.DataChunk2;
 import org.apache.carbondata.format.DataChunk3;
 import org.apache.carbondata.format.Encoding;
 import org.apache.carbondata.format.FileFooter;
+import org.apache.carbondata.format.FileFooter3;
+import org.apache.carbondata.format.FileHeader;
 import org.apache.carbondata.format.IndexHeader;
 import org.apache.carbondata.format.PresenceMeta;
 import org.apache.carbondata.format.SegmentInfo;
@@ -114,17 +116,17 @@ public class CarbonMetadataUtil {
   }
 
   /**
-   * It converts list of BlockletInfoColumnar to FileFooter thrift objects
+   * Below method prepares the file footer object for carbon data file version 3
    *
    * @param infoList
    * @param numCols
    * @param cardinalities
    * @return FileFooter
    */
-  public static FileFooter convertFileFooter3(List<BlockletInfo3> infoList,
-      List<BlockletIndex> blockletIndexs, int[] cardinalities, List<ColumnSchema> columnSchemaList,
+  public static FileFooter3 convertFileFooterVersion3(List<BlockletInfo3> infoList,
+      List<BlockletIndex> blockletIndexs, int[] cardinalities, int numberOfColumns,
       SegmentProperties segmentProperties) throws IOException {
-    FileFooter footer = getFileFooter3(infoList, blockletIndexs, cardinalities, columnSchemaList);
+    FileFooter3 footer = getFileFooter3(infoList, blockletIndexs, cardinalities, numberOfColumns);
     for (BlockletInfo3 info : infoList) {
       footer.addToBlocklet_info_list3(info);
     }
@@ -139,18 +141,14 @@ public class CarbonMetadataUtil {
    * @param columnSchemaList column schema list
    * @return file footer
    */
-  private static FileFooter getFileFooter3(List<BlockletInfo3> infoList,
-      List<BlockletIndex> blockletIndexs, int[] cardinalities,
-      List<ColumnSchema> columnSchemaList) {
+  private static FileFooter3 getFileFooter3(List<BlockletInfo3> infoList,
+      List<BlockletIndex> blockletIndexs, int[] cardinalities, int numberOfColumns) {
     SegmentInfo segmentInfo = new SegmentInfo();
-    segmentInfo.setNum_cols(columnSchemaList.size());
+    segmentInfo.setNum_cols(numberOfColumns);
     segmentInfo.setColumn_cardinalities(CarbonUtil.convertToIntegerList(cardinalities));
-    ColumnarFormatVersion version = CarbonProperties.getInstance().getFormatVersion();
-    FileFooter footer = new FileFooter();
-    footer.setVersion(version.number());
+    FileFooter3 footer = new FileFooter3();
     footer.setNum_rows(getNumberOfRowForFooter(infoList));
     footer.setSegment_info(segmentInfo);
-    footer.setTable_columns(columnSchemaList);
     for (BlockletIndex info : blockletIndexs) {
       footer.addToBlocklet_index_list(info);
     }
@@ -247,12 +245,29 @@ public class CarbonMetadataUtil {
   public static BlockletIndex getBlockletIndex(List<NodeHolder> nodeHolderList,
       List<CarbonMeasure> carbonMeasureList) {
     BlockletMinMaxIndex blockletMinMaxIndex = new BlockletMinMaxIndex();
-    for (byte[] max : nodeHolderList.get(nodeHolderList.size() - 1).getColumnMaxData()) {
+    // Calculating min/max for every each column.
+    byte[][] minCol = nodeHolderList.get(0).getColumnMinData().clone();
+    byte[][] maxCol = nodeHolderList.get(0).getColumnMaxData().clone();
+    for (NodeHolder nodeHolder : nodeHolderList) {
+      byte[][] columnMaxData = nodeHolder.getColumnMaxData();
+      byte[][] columnMinData = nodeHolder.getColumnMinData();
+      for (int i = 0; i < maxCol.length; i++) {
+        if (ByteUtil.UnsafeComparer.INSTANCE.compareTo(columnMaxData[i], maxCol[i]) > 0) {
+          maxCol[i] = columnMaxData[i];
+        }
+        if (ByteUtil.UnsafeComparer.INSTANCE.compareTo(columnMinData[i], minCol[i]) < 0) {
+          minCol[i] = columnMinData[i];
+        }
+      }
+    }
+    // Writing min/max to thrift file
+    for (byte[] max : maxCol) {
       blockletMinMaxIndex.addToMax_values(ByteBuffer.wrap(max));
     }
-    for (byte[] min : nodeHolderList.get(0).getColumnMinData()) {
+    for (byte[] min : minCol) {
       blockletMinMaxIndex.addToMin_values(ByteBuffer.wrap(min));
     }
+
     byte[][] measureMaxValue = nodeHolderList.get(0).getMeasureColumnMaxData().clone();
     byte[][] measureMinValue = nodeHolderList.get(0).getMeasureColumnMinData().clone();
     byte[] minVal = null;
@@ -345,7 +360,9 @@ public class CarbonMetadataUtil {
       if (!isSortedKeyColumn[i]) {
         dataChunk.setRowid_page_offset(blockletInfoColumnar.getKeyBlockIndexOffSets()[j]);
         dataChunk.setRowid_page_length(blockletInfoColumnar.getKeyBlockIndexLength()[j]);
-        encodings.add(Encoding.INVERTED_INDEX);
+        if (!encodings.contains(Encoding.INVERTED_INDEX)) {
+          encodings.add(Encoding.INVERTED_INDEX);
+        }
         j++;
       }
 
@@ -849,7 +866,7 @@ public class CarbonMetadataUtil {
         b.flip();
         return b.array();
       case DECIMAL:
-        return DataTypeUtil.bigDecimalToByte((BigDecimal)data);
+        return DataTypeUtil.bigDecimalToByte((BigDecimal) data);
       default:
         throw new IllegalArgumentException("Invalid data type");
     }
@@ -863,7 +880,7 @@ public class CarbonMetadataUtil {
         firstBuffer = ByteBuffer.allocate(8);
         firstBuffer.put(first);
         secondBuffer = ByteBuffer.allocate(8);
-        secondBuffer.put(first);
+        secondBuffer.put(second);
         firstBuffer.flip();
         secondBuffer.flip();
         return (int) (firstBuffer.getDouble() - secondBuffer.getDouble());
@@ -873,7 +890,7 @@ public class CarbonMetadataUtil {
         firstBuffer = ByteBuffer.allocate(8);
         firstBuffer.put(first);
         secondBuffer = ByteBuffer.allocate(8);
-        secondBuffer.put(first);
+        secondBuffer.put(second);
         firstBuffer.flip();
         secondBuffer.flip();
         return (int) (firstBuffer.getLong() - secondBuffer.getLong());
@@ -885,4 +902,100 @@ public class CarbonMetadataUtil {
     }
   }
 
+  /**
+   * Below method will be used to prepare the file header object for carbondata file
+   *
+   * @param isFooterPresent  is footer present in carbon data file
+   * @param columnSchemaList list of column schema
+   * @param schemaUpdatedTimeStamp  schema updated time stamp to be used for restructure scenarios
+   * @return file header thrift object
+   */
+  public static FileHeader getFileHeader(boolean isFooterPresent,
+      List<ColumnSchema> columnSchemaList, long schemaUpdatedTimeStamp) {
+    FileHeader fileHeader = new FileHeader();
+    ColumnarFormatVersion version = CarbonProperties.getInstance().getFormatVersion();
+    fileHeader.setIs_footer_present(isFooterPresent);
+    fileHeader.setColumn_schema(columnSchemaList);
+    fileHeader.setVersion(version.number());
+    fileHeader.setTime_stamp(schemaUpdatedTimeStamp);
+    return fileHeader;
+  }
+
+  /**
+   * Below method will be used to get the data chunk2 serialize object list
+   *
+   * @param nodeHolder        node holder
+   * @param columnSchenma     table columns
+   * @param segmentProperties segment properties
+   * @param isDimensionColumn to get the list of dimension column or measure column
+   * @return list of data chunk2
+   * @throws IOException
+   */
+  public static List<byte[]> getDataChunk2(NodeHolder nodeHolder, List<ColumnSchema> columnSchenma,
+      SegmentProperties segmentProperties, boolean isDimensionColumn) throws IOException {
+    List<byte[]> dataChunkBuffer = new ArrayList<>();
+    if (isDimensionColumn) {
+      for (int i = 0; i < nodeHolder.getKeyArray().length; i++) {
+        DataChunk2 dataChunk = new DataChunk2();
+        dataChunk.min_max = new BlockletMinMaxIndex();
+        dataChunk.setChunk_meta(getChunkCompressionMeta());
+        dataChunk.setNumberOfRowsInpage(nodeHolder.getEntryCount());
+        List<Encoding> encodings = new ArrayList<Encoding>();
+        dataChunk.setData_page_length(nodeHolder.getKeyLengths()[i]);
+        if (containsEncoding(i, Encoding.DICTIONARY, columnSchenma, segmentProperties)) {
+          encodings.add(Encoding.DICTIONARY);
+        }
+        if (containsEncoding(i, Encoding.DIRECT_DICTIONARY, columnSchenma, segmentProperties)) {
+          encodings.add(Encoding.DIRECT_DICTIONARY);
+        }
+        dataChunk.setRowMajor(nodeHolder.getColGrpBlocks()[i]);
+        if (nodeHolder.getAggBlocks()[i]) {
+          dataChunk.setRle_page_length(nodeHolder.getDataIndexMapLength()[i]);
+          encodings.add(Encoding.RLE);
+        }
+        dataChunk.setSort_state(
+            nodeHolder.getIsSortedKeyBlock()[i] ? SortState.SORT_EXPLICIT : SortState.SORT_NATIVE);
+        if (!nodeHolder.getIsSortedKeyBlock()[i]) {
+          dataChunk.setRowid_page_length(nodeHolder.getKeyBlockIndexLength()[i]);
+          encodings.add(Encoding.INVERTED_INDEX);
+        }
+        dataChunk.min_max.addToMax_values(ByteBuffer.wrap(nodeHolder.getColumnMaxData()[i]));
+        dataChunk.min_max.addToMin_values(ByteBuffer.wrap(nodeHolder.getColumnMinData()[i]));
+        dataChunk.setEncoders(encodings);
+        dataChunkBuffer.add(CarbonUtil.getByteArray(dataChunk));
+      }
+    } else {
+      for (int i = 0; i < nodeHolder.getDataArray().length; i++) {
+        DataChunk2 dataChunk = new DataChunk2();
+        dataChunk.min_max = new BlockletMinMaxIndex();
+        dataChunk.setChunk_meta(getChunkCompressionMeta());
+        dataChunk.setNumberOfRowsInpage(nodeHolder.getEntryCount());
+        dataChunk.setData_page_length(nodeHolder.getDataArray()[i].length);
+        List<Encoding> encodings = new ArrayList<Encoding>();
+        // TODO : Right now the encodings are happening at runtime. change as
+        // per this encoders.
+        dataChunk.setEncoders(encodings);
+        dataChunk.setRowMajor(false);
+        // TODO : Right now the encodings are happening at runtime. change as
+        // per this encoders.
+        encodings.add(Encoding.DELTA);
+        dataChunk.setEncoders(encodings);
+        // TODO writing dummy presence meta need to set actual presence
+        // meta
+        PresenceMeta presenceMeta = new PresenceMeta();
+        presenceMeta.setPresent_bit_streamIsSet(true);
+        presenceMeta.setPresent_bit_stream(CompressorFactory.getInstance().getCompressor()
+            .compressByte(nodeHolder.getMeasureNullValueIndex()[i].toByteArray()));
+        dataChunk.setPresence(presenceMeta);
+        List<ByteBuffer> encoderMetaList = new ArrayList<ByteBuffer>();
+        encoderMetaList.add(ByteBuffer.wrap(serializeEncodeMetaUsingByteBuffer(
+            createValueEncoderMeta(nodeHolder.getCompressionModel(), i))));
+        dataChunk.setEncoder_meta(encoderMetaList);
+        dataChunk.min_max.addToMax_values(ByteBuffer.wrap(nodeHolder.getMeasureColumnMaxData()[i]));
+        dataChunk.min_max.addToMin_values(ByteBuffer.wrap(nodeHolder.getMeasureColumnMinData()[i]));
+        dataChunkBuffer.add(CarbonUtil.getByteArray(dataChunk));
+      }
+    }
+    return dataChunkBuffer;
+  }
 }

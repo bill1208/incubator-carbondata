@@ -18,12 +18,10 @@
 package org.apache.spark.sql.execution.command
 
 import java.io.File
-import java.util.concurrent.Callable
-import java.util.concurrent.Executors
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Future
+import java.util.concurrent.{Callable, Executors, ExecutorService, Future}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 import scala.language.implicitConversions
 
 import org.apache.commons.lang3.StringUtils
@@ -33,29 +31,33 @@ import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
-import org.apache.spark.sql.hive.{CarbonMetastore, CarbonRelation}
+import org.apache.spark.sql.hive.{CarbonMetastore, CarbonRelation, HiveExternalCatalog}
 import org.apache.spark.util.FileUtils
 import org.codehaus.jackson.map.ObjectMapper
 
 import org.apache.carbondata.api.CarbonStore
 import org.apache.carbondata.common.logging.LogServiceFactory
+import org.apache.carbondata.core.cache.dictionary.ManageDictionary
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.dictionary.server.DictionaryServer
 import org.apache.carbondata.core.locks.{CarbonLockFactory, LockUsage}
 import org.apache.carbondata.core.metadata.{CarbonMetadata, CarbonTableIdentifier}
+import org.apache.carbondata.core.metadata.converter.ThriftWrapperSchemaConverterImpl
 import org.apache.carbondata.core.metadata.encoder.Encoding
 import org.apache.carbondata.core.metadata.schema.table.{CarbonTable, TableInfo}
-import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension
+import org.apache.carbondata.core.metadata.schema.table.column.{CarbonColumn, CarbonDimension}
 import org.apache.carbondata.core.mutate.{CarbonUpdateUtil, TupleIdEnum}
 import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
 import org.apache.carbondata.core.util.path.CarbonStorePath
+import org.apache.carbondata.format.SchemaEvolutionEntry
 import org.apache.carbondata.processing.constants.TableOptionConstant
 import org.apache.carbondata.processing.etl.DataLoadingException
 import org.apache.carbondata.processing.model.{CarbonDataLoadSchema, CarbonLoadModel}
+import org.apache.carbondata.processing.newflow.constants.DataLoadProcessorConstants
 import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
 import org.apache.carbondata.spark.rdd.{CarbonDataRDDFactory, DictionaryLoadModel}
-import org.apache.carbondata.spark.util.{CarbonScalaUtil, CarbonSparkUtil, CommonUtil, GlobalDictionaryUtil}
+import org.apache.carbondata.spark.util.{CarbonScalaUtil, CarbonSparkUtil, CommonUtil, DataTypeConverterUtil, GlobalDictionaryUtil}
 
 object Checker {
   def validateTableExists(
@@ -172,8 +174,8 @@ case class CreateTable(cm: TableModel, createDSTable: Boolean = true) extends Ru
           cm.msrCols.foreach(f => fields(f.schemaOrdinal) = f)
           sparkSession.sql(
             s"""CREATE TABLE $dbName.$tbName
-                |(${fields.map(f => f.rawSchema).mkString(",")})
-                |USING org.apache.spark.sql.CarbonSource""".stripMargin +
+               |(${fields.map(f => f.rawSchema).mkString(",")})
+               |USING org.apache.spark.sql.CarbonSource""".stripMargin +
             s""" OPTIONS (tableName "$tbName", dbName "$dbName", tablePath "$tablePath") """)
         } catch {
           case e: Exception =>
@@ -297,7 +299,7 @@ case class LoadTableByInsert(relation: CarbonDatasourceHadoopRelation, child: Lo
       Some(df)).run(sparkSession)
     // updating relation metadata. This is in case of auto detect high cardinality
     relation.carbonRelation.metaData =
-        CarbonSparkUtil.createSparkMeta(relation.carbonRelation.tableMeta.carbonTable)
+      CarbonSparkUtil.createSparkMeta(relation.carbonRelation.tableMeta.carbonTable)
     load
   }
 }
@@ -341,7 +343,7 @@ case class LoadTable(
     }
 
     val relation = CarbonEnv.get.carbonMetastore
-        .lookupRelation(Option(dbName), tableName)(sparkSession).asInstanceOf[CarbonRelation]
+      .lookupRelation(Option(dbName), tableName)(sparkSession).asInstanceOf[CarbonRelation]
     if (relation == null) {
       sys.error(s"Table $dbName.$tableName does not exist")
     }
@@ -354,10 +356,10 @@ case class LoadTable(
     try {
       // take lock only in case of normal data load.
       if (!updateModel.isDefined) {
-      if (carbonLock.lockWithRetries()) {
-        LOGGER.info("Successfully able to get the table metadata file lock")
-      } else {
-        sys.error("Table is locked for updation. Please try after some time")
+        if (carbonLock.lockWithRetries()) {
+          LOGGER.info("Successfully able to get the table metadata file lock")
+        } else {
+          sys.error("Table is locked for updation. Please try after some time")
         }
       }
 
@@ -417,7 +419,11 @@ case class LoadTable(
       val columnDict = options.getOrElse("columndict", null)
       val serializationNullFormat = options.getOrElse("serialization_null_format", "\\N")
       val badRecordsLoggerEnable = options.getOrElse("bad_records_logger_enable", "false")
-      val badRecordsLoggerRedirect = options.getOrElse("bad_records_action", "force")
+      val badRecordActionValue = CarbonProperties.getInstance()
+        .getProperty(CarbonCommonConstants.CARBON_BAD_RECORDS_ACTION,
+          CarbonCommonConstants.CARBON_BAD_RECORDS_ACTION_DEFAULT)
+      val badRecordsAction = options.getOrElse("bad_records_action", badRecordActionValue)
+      val isEmptyDataBadRecord = options.getOrElse("is_empty_data_bad_record", "false")
       val allDictionaryPath = options.getOrElse("all_dictionary_path", "")
       val complex_delimiter_level_1 = options.getOrElse("complex_delimiter_level_1", "\\$")
       val complex_delimiter_level_2 = options.getOrElse("complex_delimiter_level_2", "\\:")
@@ -443,8 +449,10 @@ case class LoadTable(
           TableOptionConstant.BAD_RECORDS_LOGGER_ENABLE.getName + "," + badRecordsLoggerEnable)
       carbonLoadModel
         .setBadRecordsAction(
-          TableOptionConstant.BAD_RECORDS_ACTION.getName + "," + badRecordsLoggerRedirect)
-
+          TableOptionConstant.BAD_RECORDS_ACTION.getName + "," + badRecordsAction)
+      carbonLoadModel
+        .setIsEmptyDataBadRecord(
+          DataLoadProcessorConstants.IS_EMPTY_DATA_BAD_RECORD + "," + isEmptyDataBadRecord)
       val useOnePass = options.getOrElse("single_pass", "false").trim.toLowerCase match {
         case "true" =>
           if (!useKettle && StringUtils.isEmpty(allDictionaryPath)) {
@@ -458,7 +466,7 @@ case class LoadTable(
           false
         case illegal =>
           LOGGER.error(s"Can't use single_pass, because illegal syntax found: [" + illegal + "] " +
-            "Please set it as 'true' or 'false'")
+                       "Please set it as 'true' or 'false'")
           false
       }
       carbonLoadModel.setUseOnePass(useOnePass)
@@ -783,13 +791,15 @@ private[sql] case class DescribeCommandFormatted(
       .lookupRelation(tblIdentifier)(sparkSession).asInstanceOf[CarbonRelation]
     val mapper = new ObjectMapper()
     val colProps = StringBuilder.newBuilder
+    val dims = relation.metaData.dims.map(x => x.toLowerCase)
     var results: Seq[(String, String, String)] = child.schema.fields.map { field =>
-      val comment = if (relation.metaData.dims.contains(field.name)) {
+      val fieldName = field.name.toLowerCase
+      val comment = if (dims.contains(fieldName)) {
         val dimension = relation.metaData.carbonTable.getDimensionByName(
           relation.tableMeta.carbonTableIdentifier.getTableName,
-          field.name)
+          fieldName)
         if (null != dimension.getColumnProperties && dimension.getColumnProperties.size() > 0) {
-          colProps.append(field.name).append(".")
+          colProps.append(fieldName).append(".")
             .append(mapper.writeValueAsString(dimension.getColumnProperties))
             .append(",")
         }

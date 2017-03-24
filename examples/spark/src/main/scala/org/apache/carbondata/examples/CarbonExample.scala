@@ -27,16 +27,16 @@ object CarbonExample {
     val cc = ExampleUtils.createCarbonContext("CarbonExample")
     val testData = ExampleUtils.currentPath + "/src/main/resources/data.csv"
 
-    // Specify timestamp format based on raw data
+    // Specify date format based on raw data
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.CARBON_TIMESTAMP_FORMAT, "yyyy/MM/dd")
+      .addProperty(CarbonCommonConstants.CARBON_DATE_FORMAT, "yyyy/MM/dd")
 
     cc.sql("DROP TABLE IF EXISTS t3")
 
     // Create table, 6 dimensions, 1 measure
     cc.sql("""
            CREATE TABLE IF NOT EXISTS t3
-           (ID Int, date Timestamp, country String,
+           (ID Int, date Date, country String,
            name String, phonetype String, serialname char(10), salary Int)
            STORED BY 'carbondata'
            """)
@@ -44,23 +44,9 @@ object CarbonExample {
     // Currently there are two data loading flows in CarbonData, one uses Kettle as ETL tool
     // in each node to do data loading, another uses a multi-thread framework without Kettle (See
     // AbstractDataLoadProcessorStep)
-    // Load data with Kettle
+    // Load data
     cc.sql(s"""
            LOAD DATA LOCAL INPATH '$testData' into table t3
-           """)
-
-    // Perform a query
-    cc.sql("""
-           SELECT country, count(salary) AS amount
-           FROM t3
-           WHERE country IN ('china','france')
-           GROUP BY country
-           """).show()
-
-    // Load data without kettle
-    cc.sql(s"""
-           LOAD DATA LOCAL INPATH '$testData' into table t3
-           OPTIONS('USE_KETTLE'='false')
            """)
 
     // Perform a query

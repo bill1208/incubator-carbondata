@@ -36,7 +36,7 @@ import org.apache.carbondata.processing.schema.metadata.ColumnSchemaDetailsWrapp
 import org.apache.carbondata.processing.schema.metadata.HierarchiesInfo;
 import org.apache.carbondata.processing.schema.metadata.TableOptionWrapper;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
-import org.apache.carbondata.processing.util.RemoveDictionaryUtil;
+import org.apache.carbondata.processing.util.NonDictionaryUtil;
 
 import org.pentaho.di.core.CheckResultInterface;
 import org.pentaho.di.core.Counter;
@@ -670,7 +670,7 @@ public class CarbonCSVBasedSeqGenMeta extends BaseStepMeta implements StepMetaIn
     tableOptionWrapper.populateTableOptions(tableOption);
 
     updateDimensions(carbondim, carbonmsr, noDictionaryDims);
-    dimColDataTypes = RemoveDictionaryUtil.extractDimColsDataTypeValues(columnsDataTypeString);
+    dimColDataTypes = NonDictionaryUtil.extractDimColsDataTypeValues(columnsDataTypeString);
     if (null != complexTypeString) {
       complexTypes = getComplexTypesMap(complexTypeString);
     } else {
@@ -777,7 +777,12 @@ public class CarbonCSVBasedSeqGenMeta extends BaseStepMeta implements StepMetaIn
   }
 
   private void updateMeasureAggregator(String msrAggregatorString) {
-    String[] split = msrAggregatorString.split(CarbonCommonConstants.SEMICOLON_SPC_CHARACTER);
+    String[] split = null;
+    if (msrAggregatorString == null) {
+      split =  new String[0];
+    } else {
+      split = msrAggregatorString.split(CarbonCommonConstants.SEMICOLON_SPC_CHARACTER);
+    }
     msrAggregators = new String[split.length];
     System.arraycopy(split, 0, msrAggregators, 0, split.length);
   }
@@ -1068,9 +1073,14 @@ public class CarbonCSVBasedSeqGenMeta extends BaseStepMeta implements StepMetaIn
     dimColNames = list.toArray(new String[list.size()]);
 
     // get high cardinality dimension Array
-    noDictionaryCols = RemoveDictionaryUtil.extractNoDictionaryDimsArr(noDictionaryDims);
+    noDictionaryCols = NonDictionaryUtil.extractNoDictionaryDimsArr(noDictionaryDims);
 
-    String[] sm = msr.split(CarbonCommonConstants.COMA_SPC_CHARACTER);
+    String[] sm = null;
+    if (null != msr) {
+      sm = msr.split(CarbonCommonConstants.COMA_SPC_CHARACTER);
+    } else {
+      sm = new String[0];
+    }
     int[] m = new int[sm.length];
     Set<String> mlist = new LinkedHashSet<String>();
     for (int i = 0; i < m.length; i++) {

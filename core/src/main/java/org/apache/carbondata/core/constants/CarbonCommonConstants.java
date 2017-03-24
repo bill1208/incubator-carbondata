@@ -174,6 +174,11 @@ public final class CarbonCommonConstants {
    * MEMBER_DEFAULT_VAL_ARRAY
    */
   public static final byte[] MEMBER_DEFAULT_VAL_ARRAY = MEMBER_DEFAULT_VAL.getBytes();
+
+  /**
+   * Bytes for string 0, it is used in codegen in case of null values.
+   */
+  public static final byte[] ZERO_BYTE_ARRAY = "0".getBytes();
   /**
    * FILE STATUS IN-PROGRESS
    */
@@ -185,8 +190,7 @@ public final class CarbonCommonConstants {
   /**
    * CARBON_BADRECORDS_LOCATION_DEFAULT
    */
-  public static final String CARBON_BADRECORDS_LOC_DEFAULT_VAL =
-      "../unibi-solutions/system/carbon/badRecords";
+  public static final String CARBON_BADRECORDS_LOC_DEFAULT_VAL = "/tmp/carbon/badRecords";
   /**
    * HIERARCHY_FILE_EXTENSION
    */
@@ -249,6 +253,10 @@ public final class CarbonCommonConstants {
    * SORT_INTERMEDIATE_FILES_LIMIT_DEFAULT_VALUE
    */
   public static final String SORT_INTERMEDIATE_FILES_LIMIT_DEFAULT_VALUE = "20";
+  /**
+   * BAD_RECORD_KEY_VALUE
+   */
+  public static final String BAD_RECORD_KEY = "BADRECORD";
   /**
    * MERGERD_EXTENSION
    */
@@ -383,7 +391,8 @@ public final class CarbonCommonConstants {
    */
   public static final String CARBON_TIMESTAMP_DEFAULT_FORMAT = "yyyy-MM-dd HH:mm:ss";
   /**
-   * CARBON_TIMESTAMP_DEFAULT_FORMAT
+   * Property for specifying the format of TIMESTAMP data type column.
+   * e.g. yyyy/MM/dd HH:mm:ss, or using CARBON_TIMESTAMP_DEFAULT_FORMAT
    */
   public static final String CARBON_TIMESTAMP_FORMAT = "carbon.timestamp.format";
 
@@ -392,7 +401,8 @@ public final class CarbonCommonConstants {
    */
   public static final String CARBON_DATE_DEFAULT_FORMAT = "yyyy-MM-dd";
   /**
-   * CARBON_DATE_DEFAULT_FORMAT
+   * Property for specifying the format of DATE data type column.
+   * e.g. yyyy/MM/dd , or using CARBON_DATE_DEFAULT_FORMAT
    */
   public static final String CARBON_DATE_FORMAT = "carbon.date.format";
   /**
@@ -804,6 +814,8 @@ public final class CarbonCommonConstants {
   public static final String COLUMN_PROPERTIES = "columnproperties";
   // table block size in MB
   public static final String TABLE_BLOCKSIZE = "table_blocksize";
+  // set in column level to disable inverted index
+  public static final String NO_INVERTED_INDEX = "no_inverted_index";
 
   /**
    * this variable is to enable/disable identify high cardinality during first data loading
@@ -1083,6 +1095,25 @@ public final class CarbonCommonConstants {
 
   public static final String IN_MEMORY_FOR_SORT_DATA_IN_MB_DEFAULT = "1024";
 
+  /**
+   * Sorts the data in batches and writes the batch data to store with index file.
+   */
+  public static final String LOAD_USE_BATCH_SORT = "carbon.load.use.batch.sort";
+
+  /**
+   * If set to true, the sorting scope is smaller and more index tree will be created,
+   * thus loading is faster but query maybe slower.
+   * If set to false, the sorting scope is bigger and one index tree per data node will be created,
+   * thus loading is slower but query is faster.
+   */
+  public static final String LOAD_USE_BATCH_SORT_DEFAULT = "false";
+
+  /**
+   * Size of batch data to keep in memory, as a thumb rule it supposed
+   * to be less than 45% of sort.inmemory.size.inmb otherwise it may spill intermediate data to disk
+   */
+  public static final String LOAD_BATCH_SORT_SIZE_INMB = "carbon.load.batch.sort.size.inmb";
+
   public static final String ENABLE_VECTOR_READER = "carbon.enable.vector.reader";
 
   public static final String ENABLE_VECTOR_READER_DEFAULT = "false";
@@ -1146,6 +1177,19 @@ public final class CarbonCommonConstants {
   public static final String USE_KETTLE = "use_kettle";
 
   public static final String USE_KETTLE_DEFAULT = "false";
+  public static final String CARBON_CUSTOM_BLOCK_DISTRIBUTION = "carbon.custom.block.distribution";
+  public static final String CARBON_CUSTOM_BLOCK_DISTRIBUTION_DEFAULT = "false";
+
+  public static final int DICTIONARY_DEFAULT_CARDINALITY = 1;
+
+  public static final String SPARK_SCHEMA_STRING_LENGTH_THRESHOLD =
+      "spark.sql.sources.schemaStringLengthThreshold";
+
+  public static final int SPARK_SCHEMA_STRING_LENGTH_THRESHOLD_DEFAULT = 4000;
+
+  public static final String CARBON_BAD_RECORDS_ACTION = "carbon.bad.records.action";
+
+  public static final String CARBON_BAD_RECORDS_ACTION_DEFAULT = "FORCE";
 
   private CarbonCommonConstants() {
   }

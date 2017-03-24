@@ -44,6 +44,7 @@ import org.apache.carbondata.core.constants.CarbonV3DataFormatConstants;
 import org.apache.carbondata.core.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.datastore.columnar.BlockIndexerStorageForInt;
 import org.apache.carbondata.core.datastore.columnar.BlockIndexerStorageForNoInvertedIndex;
+import org.apache.carbondata.core.datastore.columnar.BlockIndexerStorageForNoInvertedIndexForShort;
 import org.apache.carbondata.core.datastore.columnar.BlockIndexerStorageForShort;
 import org.apache.carbondata.core.datastore.columnar.ColumnGroupModel;
 import org.apache.carbondata.core.datastore.columnar.IndexStorage;
@@ -74,7 +75,8 @@ import org.apache.carbondata.processing.store.colgroup.DataHolder;
 import org.apache.carbondata.processing.store.writer.CarbonDataWriterVo;
 import org.apache.carbondata.processing.store.writer.CarbonFactDataWriter;
 import org.apache.carbondata.processing.store.writer.exception.CarbonDataWriterException;
-import org.apache.carbondata.processing.util.RemoveDictionaryUtil;
+import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
+import org.apache.carbondata.processing.util.NonDictionaryUtil;
 
 import org.apache.spark.sql.types.Decimal;
 
@@ -258,6 +260,12 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
 
   private int bucketNumber;
 
+  private long schemaUpdatedTimeStamp;
+
+  private String segmentId;
+
+  private int taskExtension;
+
   /**
    * current data format version
    */
@@ -283,6 +291,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     this.aggKeyBlock = new boolean[columnStoreCount];
     this.isNoDictionary = new boolean[columnStoreCount];
     this.bucketNumber = carbonFactDataHandlerModel.getBucketId();
+    this.taskExtension = carbonFactDataHandlerModel.getTaskExtension();
     this.isUseInvertedIndex = new boolean[columnStoreCount];
     if (null != carbonFactDataHandlerModel.getIsUseInvertedIndex()) {
       for (int i = 0; i < isUseInvertedIndex.length; i++) {
@@ -353,6 +362,8 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     this.completeDimLens = carbonFactDataHandlerModel.getDimLens();
     this.dimLens = this.segmentProperties.getDimColumnsCardinality();
     this.carbonDataFileAttributes = carbonFactDataHandlerModel.getCarbonDataFileAttributes();
+    this.schemaUpdatedTimeStamp = carbonFactDataHandlerModel.getSchemaUpdatedTimeStamp();
+    this.segmentId = carbonFactDataHandlerModel.getSegmentId();
     //TODO need to pass carbon table identifier to metadata
     CarbonTable carbonTable = CarbonMetadata.getInstance()
         .getCarbonTable(databaseName + CarbonCommonConstants.UNDERSCORE + tableName);
@@ -601,8 +612,8 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
             .clone();
     NodeHolder nodeHolder =
         getNodeHolderObject(writableMeasureDataArray, byteArrayValues, dataRows.size(), startKey,
-            endKey, compressionModel, noDictionaryValueHolder, noDictStartKey, noDictEndKey);
-    nodeHolder.setMeasureNullValueIndex(nullValueIndexBitSet);
+            endKey, compressionModel, noDictionaryValueHolder, noDictStartKey, noDictEndKey,
+            nullValueIndexBitSet);
     LOGGER.info("Number Of records processed: " + dataRows.size());
     return nodeHolder;
   }
@@ -747,8 +758,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     NodeHolder nodeHolder =
         getNodeHolderObjectWithOutKettle(writableMeasureDataArray, byteArrayValues, dataRows.size(),
             startKey, endKey, compressionModel, noDictionaryValueHolder, noDictStartKey,
-            noDictEndKey);
-    nodeHolder.setMeasureNullValueIndex(nullValueIndexBitSet);
+            noDictEndKey, nullValueIndexBitSet);
     LOGGER.info("Number Of records processed: " + dataRows.size());
     return nodeHolder;
   }
@@ -757,7 +767,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
   private NodeHolder getNodeHolderObject(byte[][] dataHolderLocal, byte[][] byteArrayValues,
       int entryCountLocal, byte[] startkeyLocal, byte[] endKeyLocal,
       WriterCompressModel compressionModel, byte[][] noDictionaryData, byte[] noDictionaryStartKey,
-      byte[] noDictionaryEndKey) throws CarbonDataWriterException {
+      byte[] noDictionaryEndKey, BitSet[] nullValueIndexBitSet) throws CarbonDataWriterException {
     byte[][][] noDictionaryColumnsData = null;
     List<ArrayList<byte[]>> colsAndValues = new ArrayList<ArrayList<byte[]>>();
     int complexColCount = getComplexColsCount();
@@ -778,7 +788,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
       noDictionaryColumnsData = new byte[noDictionaryCount][noDictionaryData.length][];
       for (int i = 0; i < noDictionaryData.length; i++) {
         int complexColumnIndex = primitiveDimLens.length + noDictionaryCount;
-        byte[][] splitKey = RemoveDictionaryUtil
+        byte[][] splitKey = NonDictionaryUtil
             .splitNoDictionaryKey(noDictionaryData[i], noDictionaryCount + complexIndexMap.size());
 
         int complexTypeIndex = 0;
@@ -877,13 +887,15 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     }
     return this.dataWriter
         .buildDataNodeHolder(blockStorage, dataHolderLocal, entryCountLocal, startkeyLocal,
-            endKeyLocal, compressionModel, noDictionaryStartKey, noDictionaryEndKey);
+            endKeyLocal, compressionModel, noDictionaryStartKey, noDictionaryEndKey,
+            nullValueIndexBitSet);
   }
 
   private NodeHolder getNodeHolderObjectWithOutKettle(byte[][] dataHolderLocal,
       byte[][] byteArrayValues, int entryCountLocal, byte[] startkeyLocal, byte[] endKeyLocal,
       WriterCompressModel compressionModel, byte[][][] noDictionaryData,
-      byte[][] noDictionaryStartKey, byte[][] noDictionaryEndKey) throws CarbonDataWriterException {
+      byte[][] noDictionaryStartKey, byte[][] noDictionaryEndKey, BitSet[] nullValueIndexBitSet)
+      throws CarbonDataWriterException {
     byte[][][] noDictionaryColumnsData = null;
     List<ArrayList<byte[]>> colsAndValues = new ArrayList<ArrayList<byte[]>>();
     int complexColCount = getComplexColsCount();
@@ -1005,13 +1017,14 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     byte[] composedNonDictEndKey = null;
     if (noDictionaryStartKey != null) {
       composedNonDictStartKey =
-          RemoveDictionaryUtil.packByteBufferIntoSingleByteArray(noDictionaryStartKey);
+          NonDictionaryUtil.packByteBufferIntoSingleByteArray(noDictionaryStartKey);
       composedNonDictEndKey =
-          RemoveDictionaryUtil.packByteBufferIntoSingleByteArray(noDictionaryEndKey);
+          NonDictionaryUtil.packByteBufferIntoSingleByteArray(noDictionaryEndKey);
     }
     return this.dataWriter
         .buildDataNodeHolder(blockStorage, dataHolderLocal, entryCountLocal, startkeyLocal,
-            endKeyLocal, compressionModel, composedNonDictStartKey, composedNonDictEndKey);
+            endKeyLocal, compressionModel, composedNonDictStartKey, composedNonDictEndKey,
+            nullValueIndexBitSet);
   }
 
   /**
@@ -1137,6 +1150,10 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
       LOGGER.info("All blocklets have been finished writing");
       // close all the open stream for both the files
       this.dataWriter.closeWriter();
+      // rename the bad record in progress to normal
+      CarbonDataProcessorUtil.renameBadRecordsFromInProgressToNormal(
+          this.databaseName + File.separator + this.tableName + File.separator + this.segmentId
+              + File.separator + this.carbonDataFileAttributes.getTaskId());
     }
     this.dataWriter = null;
     this.keyBlockHolder = null;
@@ -1417,6 +1434,8 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     carbonDataWriterVo.setSegmentProperties(segmentProperties);
     carbonDataWriterVo.setTableBlocksize(tableBlockSize);
     carbonDataWriterVo.setBucketNumber(bucketNumber);
+    carbonDataWriterVo.setTaskExtension(taskExtension);
+    carbonDataWriterVo.setSchemaUpdatedTimeStamp(schemaUpdatedTimeStamp);
     return carbonDataWriterVo;
   }
 
@@ -1637,8 +1656,11 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
               isSortRequired);
         }
       } else {
-        return new BlockIndexerStorageForNoInvertedIndex(this.data, isCompressionReq,
-            isNoDictionary);
+        if (version == ColumnarFormatVersion.V3) {
+          return new BlockIndexerStorageForNoInvertedIndexForShort(this.data, isNoDictionary);
+        } else {
+          return new BlockIndexerStorageForNoInvertedIndex(this.data, isNoDictionary);
+        }
       }
 
     }

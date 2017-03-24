@@ -66,6 +66,10 @@ public class CarbonDataWriterVo {
 
   private int bucketNumber;
 
+  private long schemaUpdatedTimeStamp;
+
+  private int taskExtension;
+
   /**
    * @return the storeLocation
    */
@@ -303,5 +307,27 @@ public class CarbonDataWriterVo {
 
   public void setBucketNumber(int bucketNumber) {
     this.bucketNumber = bucketNumber;
+  }
+
+  /**
+   * @return
+   */
+  public long getSchemaUpdatedTimeStamp() {
+    return schemaUpdatedTimeStamp;
+  }
+
+  /**
+   * @param schemaUpdatedTimeStamp
+   */
+  public void setSchemaUpdatedTimeStamp(long schemaUpdatedTimeStamp) {
+    this.schemaUpdatedTimeStamp = schemaUpdatedTimeStamp;
+  }
+
+  public int getTaskExtension() {
+    return taskExtension;
+  }
+
+  public void setTaskExtension(int taskExtension) {
+    this.taskExtension = taskExtension;
   }
 }

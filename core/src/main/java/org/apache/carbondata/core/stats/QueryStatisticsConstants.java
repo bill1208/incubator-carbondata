@@ -31,14 +31,15 @@ public interface QueryStatisticsConstants {
   String BLOCK_IDENTIFICATION = "Time taken to identify Block(s) to scan";
 
   // executor side
-  String EXECUTOR_PART =
-      "Total Time taken to execute the query in executor Side";
+  String EXECUTOR_PART = "Total Time taken to execute the query in executor Side";
 
   String LOAD_BLOCKS_EXECUTOR = "Time taken to load the Block(s) In Executor";
 
   String SCAN_BLOCKS_NUM = "The num of blocks scanned";
 
-  String SCAN_BLOCKS_TIME = "Time taken to scan blocks";
+  String SCAN_BLOCKlET_TIME = "Time taken to scan blocks";
+
+  String READ_BLOCKlET_TIME = "Time taken to read blocks";
 
   String LOAD_DICTIONARY = "Time taken to load the Dictionary In Executor";
 
@@ -49,6 +50,10 @@ public interface QueryStatisticsConstants {
   String TOTAL_BLOCKLET_NUM = "The num of total blocklet";
 
   String VALID_SCAN_BLOCKLET_NUM = "The num of valid scanned blocklet";
+
+  String VALID_PAGE_SCANNED = "The number of valid page scanned";
+
+  String TOTAL_PAGE_SCANNED = "The number of total page scanned";
 
   // clear no-use statistics timeout
   long CLEAR_STATISTICS_TIMEOUT = 60 * 1000 * 1000000L;

@@ -84,6 +84,8 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
   protected val SERIALIZATION_NULL_FORMAT = carbonKeyWord("SERIALIZATION_NULL_FORMAT")
   protected val BAD_RECORDS_LOGGER_ENABLE = carbonKeyWord("BAD_RECORDS_LOGGER_ENABLE")
   protected val BAD_RECORDS_ACTION = carbonKeyWord("BAD_RECORDS_ACTION")
+  protected val IS_EMPTY_DATA_BAD_RECORD = carbonKeyWord("IS_EMPTY_DATA_BAD_RECORD")
+  protected val IS_EMPTY_COMMA_DATA_BAD_RECORD = carbonKeyWord("IS_NULL_DATA_BAD_RECORD")
   protected val FILES = carbonKeyWord("FILES")
   protected val FROM = carbonKeyWord("FROM")
   protected val HIERARCHIES = carbonKeyWord("HIERARCHIES")
@@ -153,6 +155,9 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
   protected val BIGINT = carbonKeyWord("BIGINT")
   protected val ARRAY = carbonKeyWord("ARRAY")
   protected val STRUCT = carbonKeyWord("STRUCT")
+
+  protected val CHANGE = carbonKeyWord("CHANGE")
+  protected val TBLPROPERTIES = carbonKeyWord("TBLPROPERTIES")
 
   protected val doubleQuotedString = "\"([^\"]+)\"".r
   protected val singleQuotedString = "'([^']+)'".r
@@ -229,14 +234,14 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
       , tableName: String, fields: Seq[Field],
       partitionCols: Seq[PartitionerField],
       tableProperties: mutable.Map[String, String],
-      bucketFields: Option[BucketFields]): TableModel = {
+      bucketFields: Option[BucketFields], isAlterFlow: Boolean = false): TableModel = {
 
     fields.zipWithIndex.foreach { x =>
       x._1.schemaOrdinal = x._2
     }
     val (dims: Seq[Field], noDictionaryDims: Seq[String]) = extractDimColsAndNoDictionaryFields(
       fields, tableProperties)
-    if (dims.isEmpty) {
+    if (dims.isEmpty && !isAlterFlow) {
       throw new MalformedCarbonCommandException(s"Table ${
         dbName.getOrElse(
           CarbonCommonConstants.DATABASE_DEFAULT_NAME)
@@ -448,9 +453,9 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
     var noInvertedIdxColsProps: Array[String] = Array[String]()
     var noInvertedIdxCols: Seq[String] = Seq[String]()
 
-    if (tableProperties.get("NO_INVERTED_INDEX").isDefined) {
+    if (tableProperties.get(CarbonCommonConstants.NO_INVERTED_INDEX).isDefined) {
       noInvertedIdxColsProps =
-        tableProperties.get("NO_INVERTED_INDEX").get.split(',').map(_.trim)
+        tableProperties.get(CarbonCommonConstants.NO_INVERTED_INDEX).get.split(',').map(_.trim)
       noInvertedIdxColsProps.foreach { noInvertedIdxColProp =>
           if (!fields.exists(x => x.column.equalsIgnoreCase(noInvertedIdxColProp))) {
             val errormsg = "NO_INVERTED_INDEX column: " + noInvertedIdxColProp +
@@ -747,7 +752,7 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
       "COMPLEX_DELIMITER_LEVEL_1", "COMPLEX_DELIMITER_LEVEL_2", "COLUMNDICT",
       "SERIALIZATION_NULL_FORMAT", "BAD_RECORDS_LOGGER_ENABLE", "BAD_RECORDS_ACTION",
       "ALL_DICTIONARY_PATH", "MAXCOLUMNS", "COMMENTCHAR", "USE_KETTLE", "DATEFORMAT",
-      "SINGLE_PASS"
+      "SINGLE_PASS", "IS_EMPTY_DATA_BAD_RECORD"
     )
     var isSupported = true
     val invalidOptions = StringBuilder.newBuilder
@@ -794,6 +799,13 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
             "option BAD_RECORDS_ACTION can have only either FORCE or IGNORE or REDIRECT")
       }
     }
+    if (options.exists(_._1.equalsIgnoreCase("IS_EMPTY_DATA_BAD_RECORD"))) {
+      val optionValue: String = options.get("is_empty_data_bad_record").get.head._2
+      if (!("true".equalsIgnoreCase(optionValue) || "false".equalsIgnoreCase(optionValue))) {
+        throw new MalformedCarbonCommandException(
+          "option IS_EMPTY_DATA_BAD_RECORD can have option either true or false")
+      }
+    }
 
     // check for duplicate options
     val duplicateOptions = options filter {
@@ -824,6 +836,19 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
     (stringLit <~ "=") ~ stringLit ^^ {
       case opt ~ optvalue => (opt.trim.toLowerCase(), optvalue)
       case _ => ("", "")
+    }
+
+  protected lazy val valueOptions: Parser[(Int, Int)] =
+    (numericLit <~ ",") ~ numericLit ^^ {
+      case opt ~ optvalue => (opt.toInt, optvalue.toInt)
+      case _ => (0, 0)
+    }
+
+  protected lazy val columnOptions: Parser[(String, String)] =
+    (stringLit <~ ",") ~ stringLit ^^ {
+      case opt ~ optvalue => (opt, optvalue)
+      case _ =>
+        throw new MalformedCarbonCommandException(s"value cannot be empty")
     }
 
   protected lazy val dimCol: Parser[Field] = anyFieldDef
@@ -1010,4 +1035,39 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
       p.getClass.getSimpleName.equals("FloatLit") ||
       p.getClass.getSimpleName.equals("DecimalLit")
     }) ^^ (_.chars)
+
+  /**
+   * This method will parse the given data type and validate against the allowed data types
+   *
+   * @param dataType
+   * @param values
+   * @return
+   */
+  protected def parseDataType(dataType: String, values: Option[List[(Int, Int)]]): DataTypeInfo = {
+    dataType match {
+      case "bigint" =>
+        if (values.isDefined) {
+          throw new MalformedCarbonCommandException("Invalid data type")
+        }
+        DataTypeInfo(dataType)
+      case "decimal" =>
+        var precision: Int = 0
+        var scale: Int = 0
+        if (values.isDefined) {
+          precision = values.get(0)._1
+          scale = values.get(0)._2
+        } else {
+          throw new MalformedCarbonCommandException("Decimal format provided is invalid")
+        }
+        // precision should be > 0 and <= 38 and scale should be >= 0 and <= 38
+        if (precision < 1 || precision > 38) {
+          throw new MalformedCarbonCommandException("Invalid value for precision")
+        } else if (scale < 0 || scale > 38) {
+          throw new MalformedCarbonCommandException("Invalid value for scale")
+        }
+        DataTypeInfo("decimal", precision, scale)
+      case _ =>
+        throw new MalformedCarbonCommandException("Data type provided is invalid.")
+    }
+  }
 }

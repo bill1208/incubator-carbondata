@@ -178,13 +178,23 @@ public class CarbonFactDataHandlerModel {
 
   private int bucketId = 0;
 
+  private String segmentId;
+
+  /**
+   * schema updated time stamp to be used for restructure scenarios
+   */
+  private long schemaUpdatedTimeStamp;
+
+  private int taskExtension;
+
   /**
    * Create the model using @{@link CarbonDataLoadConfiguration}
    * @param configuration
    * @return CarbonFactDataHandlerModel
    */
   public static CarbonFactDataHandlerModel createCarbonFactDataHandlerModel(
-      CarbonDataLoadConfiguration configuration, String storeLocation, int bucketId) {
+      CarbonDataLoadConfiguration configuration, String storeLocation, int bucketId,
+      int taskExtension) {
 
     CarbonTableIdentifier identifier =
         configuration.getTableIdentifier().getCarbonTableIdentifier();
@@ -193,8 +203,7 @@ public class CarbonFactDataHandlerModel {
     boolean[] isUseInvertedIndex =
         CarbonDataProcessorUtil.getIsUseInvertedIndex(configuration.getDataFields());
 
-    int[] dimLensWithComplex =
-        (int[]) configuration.getDataLoadProperty(DataLoadProcessorConstants.DIMENSION_LENGTHS);
+    int[] dimLensWithComplex = configuration.getCardinalityFinder().getCardinality();
     List<Integer> dimsLenList = new ArrayList<Integer>();
     for (int eachDimLen : dimLensWithComplex) {
       if (eachDimLen != 0) dimsLenList.add(eachDimLen);
@@ -253,6 +262,7 @@ public class CarbonFactDataHandlerModel {
     String carbonDataDirectoryPath = getCarbonDataFolderLocation(configuration);
 
     CarbonFactDataHandlerModel carbonFactDataHandlerModel = new CarbonFactDataHandlerModel();
+    carbonFactDataHandlerModel.setSchemaUpdatedTimeStamp(configuration.getSchemaUpdatedTimeStamp());
     carbonFactDataHandlerModel.setDatabaseName(
         identifier.getDatabaseName());
     carbonFactDataHandlerModel
@@ -269,7 +279,7 @@ public class CarbonFactDataHandlerModel {
     carbonFactDataHandlerModel.setColCardinality(colCardinality);
     carbonFactDataHandlerModel.setDataWritingRequest(true);
     carbonFactDataHandlerModel.setAggType(CarbonDataProcessorUtil
-        .getAggType(measureCount, identifier.getDatabaseName(), identifier.getTableName()));
+        .getAggType(configuration.getMeasureCount(), configuration.getMeasureFields()));
     carbonFactDataHandlerModel.setFactDimLens(dimLens);
     carbonFactDataHandlerModel.setWrapperColumnSchema(wrapperColumnSchema);
     carbonFactDataHandlerModel.setPrimitiveDimLens(simpleDimsLen);
@@ -284,6 +294,8 @@ public class CarbonFactDataHandlerModel {
       carbonFactDataHandlerModel.setMdKeyIndex(measureCount);
     }
     carbonFactDataHandlerModel.bucketId = bucketId;
+    carbonFactDataHandlerModel.segmentId = configuration.getSegmentId();
+    carbonFactDataHandlerModel.taskExtension = taskExtension;
     return carbonFactDataHandlerModel;
   }
 
@@ -498,6 +510,26 @@ public class CarbonFactDataHandlerModel {
 
   public int getBucketId() {
     return bucketId;
+  }
+
+  public long getSchemaUpdatedTimeStamp() {
+    return schemaUpdatedTimeStamp;
+  }
+
+  public void setSchemaUpdatedTimeStamp(long schemaUpdatedTimeStamp) {
+    this.schemaUpdatedTimeStamp = schemaUpdatedTimeStamp;
+  }
+
+  public String getSegmentId() {
+    return segmentId;
+  }
+
+  public void setSegmentId(String segmentId) {
+    this.segmentId = segmentId;
+  }
+
+  public int getTaskExtension() {
+    return taskExtension;
   }
 }
 

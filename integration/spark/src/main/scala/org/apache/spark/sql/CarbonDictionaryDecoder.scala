@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql
 
+import scala.collection.JavaConverters._
+
 import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -121,27 +123,28 @@ case class CarbonDictionaryDecoder(
 
   val getDictionaryColumnIds = {
     val attributes = child.output
-    val dictIds: Array[(String, ColumnIdentifier, DataType)] = attributes.map { a =>
-      val attr = aliasMap.getOrElse(a, a)
-      val relation = relations.find(p => p.contains(attr))
-      if (relation.isDefined && canBeDecoded(attr)) {
-        val carbonTable = relation.get.carbonRelation.carbonRelation.metaData.carbonTable
-        val carbonDimension =
-          carbonTable.getDimensionByName(carbonTable.getFactTableName, attr.name)
-        if (carbonDimension != null &&
-            carbonDimension.hasEncoding(Encoding.DICTIONARY) &&
-            !carbonDimension.hasEncoding(Encoding.DIRECT_DICTIONARY) &&
-            !carbonDimension.isComplex()) {
-          (carbonTable.getFactTableName, carbonDimension.getColumnIdentifier,
-            carbonDimension.getDataType)
+    val dictIds: Array[(String, ColumnIdentifier, DataType, CarbonDimension)] =
+      attributes.map { a =>
+        val attr = aliasMap.getOrElse(a, a)
+        val relation = relations.find(p => p.contains(attr))
+        if (relation.isDefined && canBeDecoded(attr)) {
+          val carbonTable = relation.get.carbonRelation.carbonRelation.metaData.carbonTable
+          val carbonDimension =
+            carbonTable.getDimensionByName(carbonTable.getFactTableName, attr.name)
+          if (carbonDimension != null &&
+              carbonDimension.hasEncoding(Encoding.DICTIONARY) &&
+              !carbonDimension.hasEncoding(Encoding.DIRECT_DICTIONARY) &&
+              !carbonDimension.isComplex()) {
+            (carbonTable.getFactTableName, carbonDimension.getColumnIdentifier,
+              carbonDimension.getDataType, carbonDimension)
+          } else {
+            (null, null, null, null)
+          }
         } else {
-          (null, null, null)
+          (null, null, null, null)
         }
-      } else {
-        (null, null, null)
-      }
 
-    }.toArray
+      }.toArray
     dictIds
   }
 
@@ -182,6 +185,7 @@ case class CarbonDictionaryDecoder(
           )
           new Iterator[InternalRow] {
             val unsafeProjection = UnsafeProjection.create(output.map(_.dataType).toArray)
+
             override final def hasNext: Boolean = {
               iter.hasNext
             }
@@ -193,7 +197,7 @@ case class CarbonDictionaryDecoder(
                 if (data(index) != null) {
                   data(index) = DataTypeUtil.getDataBasedOnDataType(dicts(index)
                     .getDictionaryValueForKeyInBytes(data(index).asInstanceOf[Int]),
-                    getDictionaryColumnIds(index)._3)
+                    getDictionaryColumnIds(index)._4)
                 }
               }
               val result = unsafeProjection(new GenericMutableRow(data))
@@ -216,20 +220,38 @@ case class CarbonDictionaryDecoder(
 
   private def getDictionary(atiMap: Map[String, AbsoluteTableIdentifier],
       cache: Cache[DictionaryColumnUniqueIdentifier, Dictionary]) = {
-    val dicts: Seq[Dictionary] = getDictionaryColumnIds.map { f =>
-      if (f._2 != null) {
-        try {
-          cache.get(new DictionaryColumnUniqueIdentifier(
-            atiMap(f._1).getCarbonTableIdentifier,
-            f._2, f._3))
-        } catch {
-          case _: Throwable => null
-        }
+    val dictionaryColumnIds = getDictionaryColumnIds.map { dictionaryId =>
+      if (dictionaryId._2 != null) {
+        new DictionaryColumnUniqueIdentifier(
+          atiMap(dictionaryId._1).getCarbonTableIdentifier,
+          dictionaryId._2, dictionaryId._3)
       } else {
         null
       }
     }
-    dicts
+    try {
+      val noDictionaryIndexes = new java.util.ArrayList[Int]()
+      dictionaryColumnIds.zipWithIndex.foreach { columnIndex =>
+        if (columnIndex._1 == null) {
+          noDictionaryIndexes.add(columnIndex._2)
+        }
+      }
+      val dict = cache.getAll(dictionaryColumnIds.filter(_ != null).toSeq.asJava);
+      val finalDict = new java.util.ArrayList[Dictionary]()
+      var dictIndex: Int = 0
+      dictionaryColumnIds.zipWithIndex.foreach { columnIndex =>
+        if (!noDictionaryIndexes.contains(columnIndex._2)) {
+          finalDict.add(dict.get(dictIndex))
+          dictIndex += 1
+        } else {
+          finalDict.add(null)
+        }
+      }
+      finalDict.asScala
+    } catch {
+      case t: Throwable => Seq.empty
+    }
+
   }
 
 }

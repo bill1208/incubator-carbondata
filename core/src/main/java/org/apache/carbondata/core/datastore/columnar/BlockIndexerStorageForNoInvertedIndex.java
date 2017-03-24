@@ -14,128 +14,76 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.carbondata.core.datastore.columnar;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-
-import org.apache.carbondata.core.constants.CarbonCommonConstants;
+import org.apache.carbondata.core.datastore.columnar.IndexStorage;
 import org.apache.carbondata.core.util.ByteUtil;
 
+/**
+ * Below class will be used to for no inverted index
+ */
 public class BlockIndexerStorageForNoInvertedIndex implements IndexStorage<int[]> {
+
+  /**
+   * column data
+   */
   private byte[][] keyBlock;
-  private byte[][] sortedBlock;
+
+  /**
+   * total number of rows
+   */
   private int totalSize;
-  private int[] dataIndexMap;
 
-  public BlockIndexerStorageForNoInvertedIndex(byte[][] keyBlockInput, boolean compressData,
-      boolean isNoDictionary) {
-    // without invertedindex but can be RLE
-    if (compressData) {
-      // with RLE
-      byte[] prvKey = keyBlockInput[0];
-      List<byte[]> list = new ArrayList<byte[]>(CarbonCommonConstants.CONSTANT_SIZE_TEN);
-      list.add(keyBlockInput[0]);
-      int counter = 1;
-      int start = 0;
-      List<Integer> map = new ArrayList<Integer>(CarbonCommonConstants.CONSTANT_SIZE_TEN);
-      int length = keyBlockInput.length;
-      for (int i = 1; i < length; i++) {
-        if (ByteUtil.UnsafeComparer.INSTANCE.compareTo(prvKey, keyBlockInput[i]) != 0) {
-          prvKey = keyBlockInput[i];
-          list.add(keyBlockInput[i]);
-          map.add(start);
-          map.add(counter);
-          start += counter;
-          counter = 1;
-          continue;
-        }
-        counter++;
+  private byte[] min;
+  private byte[] max;
+
+  public BlockIndexerStorageForNoInvertedIndex(byte[][] keyBlockInput, boolean isNoDictionary) {
+    this.keyBlock = keyBlockInput;
+    min = keyBlock[0];
+    max = keyBlock[0];
+    totalSize += keyBlock[0].length;
+    int minCompare = 0;
+    int maxCompare = 0;
+    for (int i = 1; i < keyBlock.length; i++) {
+      totalSize += keyBlock[i].length;
+      minCompare = ByteUtil.compare(min, keyBlock[i]);
+      maxCompare = ByteUtil.compare(max, keyBlock[i]);
+      if (minCompare > 0) {
+        min = keyBlock[i];
       }
-      map.add(start);
-      map.add(counter);
-      this.keyBlock = convertToKeyArray(list);
-      if (keyBlockInput.length == this.keyBlock.length) {
-        dataIndexMap = new int[0];
-      } else {
-        dataIndexMap = convertToArray(map);
+      if (maxCompare < 0) {
+        max = keyBlock[i];
       }
-    } else {
-      this.keyBlock = keyBlockInput;
-      dataIndexMap = new int[0];
     }
-
-    this.sortedBlock = new byte[keyBlock.length][];
-    System.arraycopy(keyBlock, 0, sortedBlock, 0, keyBlock.length);
-    if (isNoDictionary) {
-      Arrays.sort(sortedBlock, new Comparator<byte[]>() {
-        @Override
-        public int compare(byte[] col1, byte[] col2) {
-          return ByteUtil.UnsafeComparer.INSTANCE
-              .compareTo(col1, 2, col1.length - 2, col2, 2, col2.length - 2);
-        }
-      });
-    } else {
-      Arrays.sort(sortedBlock, new Comparator<byte[]>() {
-        @Override
-        public int compare(byte[] col1, byte[] col2) {
-          return ByteUtil.UnsafeComparer.INSTANCE.compareTo(col1, col2);
-        }
-      });
-    }
-
   }
 
-  private int[] convertToArray(List<Integer> list) {
-    int[] shortArray = new int[list.size()];
-    for (int i = 0; i < shortArray.length; i++) {
-      shortArray[i] = list.get(i);
-    }
-    return shortArray;
+  @Override public int[] getDataIndexMap() {
+    return new int[0];
   }
 
-  private byte[][] convertToKeyArray(List<byte[]> list) {
-    byte[][] shortArray = new byte[list.size()][];
-    for (int i = 0; i < shortArray.length; i++) {
-      shortArray[i] = list.get(i);
-      totalSize += shortArray[i].length;
-    }
-    return shortArray;
-  }
-
-  @Override
-  public int[] getDataIndexMap() {
-    return dataIndexMap;
-  }
-
-  @Override
-  public int getTotalSize() {
+  @Override public int getTotalSize() {
     return totalSize;
   }
 
-  @Override
-  public boolean isAlreadySorted() {
+  @Override public boolean isAlreadySorted() {
     return true;
   }
 
   /**
    * no use
+   *
    * @return
    */
-  @Override
-  public int[] getDataAfterComp() {
+  @Override public int[] getDataAfterComp() {
     return new int[0];
   }
 
   /**
    * no use
+   *
    * @return
    */
-  @Override
-  public int[] getIndexMap() {
+  @Override public int[] getIndexMap() {
     return new int[0];
   }
 
@@ -147,11 +95,10 @@ public class BlockIndexerStorageForNoInvertedIndex implements IndexStorage<int[]
   }
 
   @Override public byte[] getMin() {
-    return sortedBlock[0];
+    return min;
   }
 
   @Override public byte[] getMax() {
-    return sortedBlock[sortedBlock.length - 1];
+    return max;
   }
-
 }

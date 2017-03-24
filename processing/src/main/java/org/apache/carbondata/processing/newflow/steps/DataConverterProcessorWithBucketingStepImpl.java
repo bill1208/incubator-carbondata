@@ -52,6 +52,8 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
 
   private Partitioner<Object[]> partitioner;
 
+  private BadRecordsLogger badRecordLogger;
+
   public DataConverterProcessorWithBucketingStepImpl(CarbonDataLoadConfiguration configuration,
       AbstractDataLoadProcessorStep child) {
     super(configuration, child);
@@ -66,9 +68,10 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
   public void initialize() throws IOException {
     child.initialize();
     converters = new ArrayList<>();
-    BadRecordsLogger badRecordLogger = createBadRecordLogger();
+    badRecordLogger = createBadRecordLogger();
     RowConverter converter =
         new RowConverterImpl(child.getOutput(), configuration, badRecordLogger);
+    configuration.setCardinalityFinder(converter);
     converters.add(converter);
     converter.initialize();
     List<Integer> indexes = new ArrayList<>();
@@ -141,6 +144,7 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
   private BadRecordsLogger createBadRecordLogger() {
     boolean badRecordsLogRedirect = false;
     boolean badRecordConvertNullDisable = false;
+    boolean isDataLoadFail = false;
     boolean badRecordsLoggerEnable = Boolean.parseBoolean(
         configuration.getDataLoadProperty(DataLoadProcessorConstants.BAD_RECORDS_LOGGER_ENABLE)
             .toString());
@@ -166,6 +170,9 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
           badRecordsLogRedirect = false;
           badRecordConvertNullDisable = true;
           break;
+        case FAIL:
+          isDataLoadFail = true;
+          break;
       }
     }
     CarbonTableIdentifier identifier =
@@ -174,7 +181,7 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
         identifier.getTableName() + '_' + System.currentTimeMillis(), getBadLogStoreLocation(
         identifier.getDatabaseName() + File.separator + identifier.getTableName() + File.separator
             + configuration.getTaskNo()), badRecordsLogRedirect, badRecordsLoggerEnable,
-        badRecordConvertNullDisable);
+        badRecordConvertNullDisable, isDataLoadFail);
     return badRecordsLogger;
   }
 
@@ -190,7 +197,9 @@ public class DataConverterProcessorWithBucketingStepImpl extends AbstractDataLoa
   public void close() {
     if (!closed) {
       super.close();
-      createBadRecordLogger().closeStreams();
+      if (null != badRecordLogger) {
+        badRecordLogger.closeStreams();
+      }
       if (converters != null) {
         for (RowConverter converter : converters) {
           converter.finish();

@@ -32,7 +32,6 @@ import org.apache.carbondata.core.datastore.impl.btree.BTreeDataRefNodeFinder;
 import org.apache.carbondata.core.scan.executor.infos.BlockExecutionInfo;
 import org.apache.carbondata.core.scan.model.QueryModel;
 import org.apache.carbondata.core.scan.processor.AbstractDataBlockIterator;
-import org.apache.carbondata.core.scan.processor.BlocksChunkHolder;
 import org.apache.carbondata.core.scan.processor.impl.DataBlockIteratorImpl;
 import org.apache.carbondata.core.scan.result.vector.CarbonColumnarBatch;
 import org.apache.carbondata.core.stats.QueryStatistic;
@@ -40,7 +39,6 @@ import org.apache.carbondata.core.stats.QueryStatisticsConstants;
 import org.apache.carbondata.core.stats.QueryStatisticsModel;
 import org.apache.carbondata.core.stats.QueryStatisticsRecorder;
 import org.apache.carbondata.core.util.CarbonProperties;
-import org.apache.carbondata.core.util.CarbonUtil;
 
 /**
  * In case of detail query we cannot keep all the records in memory so for
@@ -67,14 +65,7 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
   protected FileHolder fileReader;
 
   protected AbstractDataBlockIterator dataBlockIterator;
-  /**
-   * total time scan the blocks
-   */
-  protected long totalScanTime;
-  /**
-   * is the statistic recorded
-   */
-  protected boolean isStatisticsRecorded;
+
   /**
    * QueryStatisticsRecorder
    */
@@ -87,8 +78,6 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
    * queryStatisticsModel to store query statistics object
    */
   QueryStatisticsModel queryStatisticsModel;
-
-  private BlocksChunkHolder blocksChunkHolder;
 
   public AbstractDetailQueryResultIterator(List<BlockExecutionInfo> infos, QueryModel queryModel,
       ExecutorService execService) {
@@ -104,20 +93,16 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
     } else {
       batchSize = CarbonCommonConstants.DETAIL_QUERY_BATCH_SIZE_DEFAULT;
     }
-    this.blocksChunkHolder = new BlocksChunkHolder(infos.get(0).getTotalNumberDimensionBlock(),
-        infos.get(0).getTotalNumberOfMeasureBlock());
     this.recorder = queryModel.getStatisticsRecorder();
     this.blockExecutionInfos = infos;
     this.fileReader = FileFactory.getFileHolder(
         FileFactory.getFileType(queryModel.getAbsoluteTableIdentifier().getStorePath()));
-    this.blocksChunkHolder.setFileReader(fileReader);
     this.execService = execService;
     intialiseInfos();
     initQueryStatiticsModel();
   }
 
   private void intialiseInfos() {
-    totalScanTime = System.currentTimeMillis();
     for (BlockExecutionInfo blockInfo : blockExecutionInfos) {
       DataRefNodeFinder finder = new BTreeDataRefNodeFinder(blockInfo.getEachColumnValueSize());
       DataRefNode startDataBlock = finder
@@ -144,13 +129,6 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
     } else if (blockExecutionInfos.size() > 0) {
       return true;
     } else {
-      if (!isStatisticsRecorded) {
-        QueryStatistic statistic = new QueryStatistic();
-        statistic.addFixedTimeStatistic(QueryStatisticsConstants.SCAN_BLOCKS_TIME,
-            System.currentTimeMillis() - totalScanTime);
-        recorder.recordStatistics(statistic);
-        isStatisticsRecorded = true;
-      }
       return false;
     }
   }
@@ -169,10 +147,8 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
       BlockExecutionInfo executionInfo = blockExecutionInfos.get(0);
       blockExecutionInfos.remove(executionInfo);
       queryStatisticsModel.setRecorder(recorder);
-      CarbonUtil.freeMemory(blocksChunkHolder.getDimensionRawDataChunk(),
-          blocksChunkHolder.getMeasureRawDataChunk());
       return new DataBlockIteratorImpl(executionInfo, fileReader, batchSize, queryStatisticsModel,
-          blocksChunkHolder, execService);
+          execService);
     }
     return null;
   }
@@ -185,6 +161,18 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
     QueryStatistic queryStatisticValidScanBlocklet = new QueryStatistic();
     queryStatisticsModel.getStatisticsTypeAndObjMap()
         .put(QueryStatisticsConstants.VALID_SCAN_BLOCKLET_NUM, queryStatisticValidScanBlocklet);
+    QueryStatistic totalNumberOfPages = new QueryStatistic();
+    queryStatisticsModel.getStatisticsTypeAndObjMap()
+        .put(QueryStatisticsConstants.TOTAL_PAGE_SCANNED, totalNumberOfPages);
+    QueryStatistic validPages = new QueryStatistic();
+    queryStatisticsModel.getStatisticsTypeAndObjMap()
+        .put(QueryStatisticsConstants.VALID_PAGE_SCANNED, validPages);
+    QueryStatistic scanTime = new QueryStatistic();
+    queryStatisticsModel.getStatisticsTypeAndObjMap()
+        .put(QueryStatisticsConstants.SCAN_BLOCKlET_TIME, scanTime);
+    QueryStatistic readTime = new QueryStatistic();
+    queryStatisticsModel.getStatisticsTypeAndObjMap()
+        .put(QueryStatisticsConstants.READ_BLOCKlET_TIME, readTime);
   }
 
   public void processNextBatch(CarbonColumnarBatch columnarBatch) {
@@ -192,13 +180,13 @@ public abstract class AbstractDetailQueryResultIterator<E> extends CarbonIterato
   }
 
   @Override public void close() {
+    if (null != dataBlockIterator) {
+      dataBlockIterator.close();
+    }
     try {
       fileReader.finish();
     } catch (IOException e) {
       LOGGER.error(e);
-    } finally {
-      CarbonUtil.freeMemory(blocksChunkHolder.getDimensionRawDataChunk(),
-          blocksChunkHolder.getMeasureRawDataChunk());
     }
   }
 

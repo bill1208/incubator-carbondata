@@ -45,8 +45,8 @@ import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.FileHolder;
 import org.apache.carbondata.core.datastore.block.AbstractIndex;
 import org.apache.carbondata.core.datastore.block.TableBlockInfo;
+import org.apache.carbondata.core.datastore.chunk.DimensionColumnDataChunk;
 import org.apache.carbondata.core.datastore.chunk.impl.DimensionRawColumnChunk;
-import org.apache.carbondata.core.datastore.chunk.impl.FixedLengthDimensionDataChunk;
 import org.apache.carbondata.core.datastore.chunk.impl.MeasureRawColumnChunk;
 import org.apache.carbondata.core.datastore.columnar.ColumnGroupModel;
 import org.apache.carbondata.core.datastore.columnar.UnBlockIndexer;
@@ -390,7 +390,7 @@ public final class CarbonUtil {
     }
   }
 
-  public static int getFirstIndexUsingBinarySearch(FixedLengthDimensionDataChunk dimColumnDataChunk,
+  public static int getFirstIndexUsingBinarySearch(DimensionColumnDataChunk dimColumnDataChunk,
       int low, int high, byte[] compareValue, boolean matchUpLimit) {
     int cmpResult = 0;
     while (high >= low) {
@@ -420,6 +420,100 @@ public final class CarbonUtil {
   }
 
   /**
+   * search a specific compareValue's range index in a sorted byte array
+   *
+   * @param dimColumnDataChunk
+   * @param low
+   * @param high
+   * @param compareValue
+   * @return the compareValue's range index in the dimColumnDataChunk
+   */
+  public static int[] getRangeIndexUsingBinarySearch(
+      DimensionColumnDataChunk dimColumnDataChunk, int low, int high, byte[] compareValue) {
+
+    int[] rangeIndex = new int[2];
+    int cmpResult = 0;
+    while (high >= low) {
+      int mid = (low + high) / 2;
+      cmpResult = dimColumnDataChunk.compareTo(mid, compareValue);
+      if (cmpResult < 0) {
+        low = mid + 1;
+      } else if (cmpResult > 0) {
+        high = mid - 1;
+      } else {
+
+        int currentIndex = mid;
+        while (currentIndex - 1 >= 0
+            && dimColumnDataChunk.compareTo(currentIndex - 1, compareValue) == 0) {
+          --currentIndex;
+        }
+        rangeIndex[0] = currentIndex;
+
+        currentIndex = mid;
+        while (currentIndex + 1 <= high
+            && dimColumnDataChunk.compareTo(currentIndex + 1, compareValue) == 0) {
+          currentIndex++;
+        }
+        rangeIndex[1] = currentIndex;
+
+        return rangeIndex;
+      }
+    }
+
+    // key not found. return a not exist range
+    // rangeIndex[0] = 0;
+    rangeIndex[1] = -1;
+    return rangeIndex;
+  }
+
+  /**
+   * Checks that {@code fromIndex} and {@code toIndex} are in the range and
+   * throws an exception if they aren't.
+   */
+  private static void rangeCheck(int fromIndex, int toIndex) {
+    if (fromIndex > toIndex) {
+      throw new IllegalArgumentException("fromIndex(" + fromIndex + ") > toIndex(" + toIndex + ")");
+    }
+    if (fromIndex < 0) {
+      throw new ArrayIndexOutOfBoundsException(fromIndex);
+    }
+  }
+
+  /**
+   * search a specific key in sorted byte array
+   *
+   * @param filterValues
+   * @param low
+   * @param high
+   * @param compareValue
+   * @return the compareValue's index in the filterValues
+   */
+  public static int binarySearch(byte[][] filterValues, int low, int high,
+      byte[] compareValue) {
+
+    rangeCheck(low, high);
+
+    while (low <= high) {
+      int mid = (low + high) >>> 1;
+
+      int result = ByteUtil.UnsafeComparer.INSTANCE.compareTo(filterValues[mid], compareValue);
+
+      if (result < 0) {
+        low = mid + 1;
+      } else if (result > 0) {
+        high = mid - 1;
+      } else {
+
+        return mid; // key found
+      }
+
+    }
+    // key not found
+    return -(low + 1);
+  }
+
+
+  /**
    * Method will identify the value which is lesser than the pivot element
    * on which range filter is been applied.
    *
@@ -429,7 +523,7 @@ public final class CarbonUtil {
    * @return index value
    */
   public static int nextLesserValueToTarget(int currentIndex,
-      FixedLengthDimensionDataChunk dimColumnDataChunk, byte[] compareValue) {
+      DimensionColumnDataChunk dimColumnDataChunk, byte[] compareValue) {
     while (currentIndex - 1 >= 0
         && dimColumnDataChunk.compareTo(currentIndex - 1, compareValue) >= 0) {
       --currentIndex;
@@ -449,7 +543,7 @@ public final class CarbonUtil {
    * @return index value
    */
   public static int nextGreaterValueToTarget(int currentIndex,
-      FixedLengthDimensionDataChunk dimColumnDataChunk, byte[] compareValue, int numerOfRows) {
+      DimensionColumnDataChunk dimColumnDataChunk, byte[] compareValue, int numerOfRows) {
     while (currentIndex + 1 < numerOfRows
         && dimColumnDataChunk.compareTo(currentIndex + 1, compareValue) <= 0) {
       ++currentIndex;
@@ -1059,6 +1153,44 @@ public final class CarbonUtil {
       }
     }
     return findDim;
+  }
+
+  /**
+   * This method will search for a given dimension in the current block dimensions list
+   *
+   * @param blockDimensions
+   * @param dimensionToBeSearched
+   * @return
+   */
+  public static CarbonDimension getDimensionFromCurrentBlock(
+      List<CarbonDimension> blockDimensions, CarbonDimension dimensionToBeSearched) {
+    CarbonDimension currentBlockDimension = null;
+    for (CarbonDimension blockDimension : blockDimensions) {
+      if (dimensionToBeSearched.getColumnId().equals(blockDimension.getColumnId())) {
+        currentBlockDimension = blockDimension;
+        break;
+      }
+    }
+    return currentBlockDimension;
+  }
+
+  /**
+   * This method will search for a given measure in the current block measures list
+   *
+   * @param blockMeasures
+   * @param columnId
+   * @return
+   */
+  public static CarbonMeasure getMeasureFromCurrentBlock(List<CarbonMeasure> blockMeasures,
+      String columnId) {
+    CarbonMeasure currentBlockMeasure = null;
+    for (CarbonMeasure blockMeasure : blockMeasures) {
+      if (columnId.equals(blockMeasure.getColumnId())) {
+        currentBlockMeasure = blockMeasure;
+        break;
+      }
+    }
+    return currentBlockMeasure;
   }
 
   /**

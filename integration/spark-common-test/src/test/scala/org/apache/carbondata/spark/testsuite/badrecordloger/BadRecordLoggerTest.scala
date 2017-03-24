@@ -113,7 +113,8 @@ class BadRecordLoggerTest extends QueryTest with BeforeAndAfterAll {
       csvFilePath = s"$resourcesPath/badrecords/emptyValues.csv"
       sql("LOAD DATA local inpath '" + csvFilePath + "' INTO TABLE emptyColumnValues OPTIONS"
           +
-          "('bad_records_logger_enable'='true', 'bad_records_action'='ignore', " +
+          "('bad_records_logger_enable'='true','IS_EMPTY_DATA_BAD_RECORD'='true'," +
+          " 'bad_records_action'='ignore', " +
           "'DELIMITER'= ',', 'QUOTECHAR'= '\"')");
       // load with bad_records_logger_enable to false
       sql(
@@ -137,7 +138,8 @@ class BadRecordLoggerTest extends QueryTest with BeforeAndAfterAll {
       csvFilePath = s"$resourcesPath/badrecords/emptyTimeStampValue.csv"
       sql("LOAD DATA local inpath '" + csvFilePath + "' INTO TABLE empty_timestamp OPTIONS"
           +
-          "('bad_records_logger_enable'='true', 'bad_records_action'='ignore', " +
+          "('bad_records_logger_enable'='true','IS_EMPTY_DATA_BAD_RECORD'='true' ," +
+          "'bad_records_action'='ignore', " +
           "'DELIMITER'= ',', 'QUOTECHAR'= '\"')");
       // load with bad_records_logger_enable to false
       sql(

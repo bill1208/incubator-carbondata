@@ -45,6 +45,7 @@ import org.apache.carbondata.processing.surrogatekeysgenerator.csvbased.BadRecor
 public class DataConverterProcessorStepImpl extends AbstractDataLoadProcessorStep {
 
   private List<RowConverter> converters;
+  private BadRecordsLogger badRecordLogger;
 
   public DataConverterProcessorStepImpl(CarbonDataLoadConfiguration configuration,
       AbstractDataLoadProcessorStep child) {
@@ -60,9 +61,10 @@ public class DataConverterProcessorStepImpl extends AbstractDataLoadProcessorSte
   public void initialize() throws IOException {
     child.initialize();
     converters = new ArrayList<>();
-    BadRecordsLogger badRecordLogger = createBadRecordLogger();
+    badRecordLogger = createBadRecordLogger();
     RowConverter converter =
         new RowConverterImpl(child.getOutput(), configuration, badRecordLogger);
+    configuration.setCardinalityFinder(converter);
     converters.add(converter);
     converter.initialize();
   }
@@ -114,6 +116,7 @@ public class DataConverterProcessorStepImpl extends AbstractDataLoadProcessorSte
   private BadRecordsLogger createBadRecordLogger() {
     boolean badRecordsLogRedirect = false;
     boolean badRecordConvertNullDisable = false;
+    boolean isDataLoadFail = false;
     boolean badRecordsLoggerEnable = Boolean.parseBoolean(
         configuration.getDataLoadProperty(DataLoadProcessorConstants.BAD_RECORDS_LOGGER_ENABLE)
             .toString());
@@ -139,15 +142,19 @@ public class DataConverterProcessorStepImpl extends AbstractDataLoadProcessorSte
           badRecordsLogRedirect = false;
           badRecordConvertNullDisable = true;
           break;
+        case FAIL:
+          isDataLoadFail = true;
+          break;
       }
     }
     CarbonTableIdentifier identifier =
         configuration.getTableIdentifier().getCarbonTableIdentifier();
     BadRecordsLogger badRecordsLogger = new BadRecordsLogger(identifier.getBadRecordLoggerKey(),
         identifier.getTableName() + '_' + System.currentTimeMillis(), getBadLogStoreLocation(
-        identifier.getDatabaseName() + File.separator + identifier.getTableName() + File.separator
-            + configuration.getTaskNo()), badRecordsLogRedirect, badRecordsLoggerEnable,
-        badRecordConvertNullDisable);
+        identifier.getDatabaseName() + CarbonCommonConstants.FILE_SEPARATOR + identifier
+            .getTableName() + CarbonCommonConstants.FILE_SEPARATOR + configuration.getSegmentId()
+            + CarbonCommonConstants.FILE_SEPARATOR + configuration.getTaskNo()),
+        badRecordsLogRedirect, badRecordsLoggerEnable, badRecordConvertNullDisable, isDataLoadFail);
     return badRecordsLogger;
   }
 
@@ -162,7 +169,9 @@ public class DataConverterProcessorStepImpl extends AbstractDataLoadProcessorSte
   @Override
   public void close() {
     if (!closed) {
-      createBadRecordLogger().closeStreams();
+      if (null != badRecordLogger) {
+        badRecordLogger.closeStreams();
+      }
       super.close();
       if (converters != null) {
         for (RowConverter converter : converters) {

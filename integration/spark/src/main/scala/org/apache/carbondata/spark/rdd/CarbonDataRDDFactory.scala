@@ -77,7 +77,21 @@ object CarbonDataRDDFactory {
     if (alterTableModel.compactionType.equalsIgnoreCase("major")) {
       compactionSize = CarbonDataMergerUtil.getCompactionSize(CompactionType.MAJOR_COMPACTION)
       compactionType = CompactionType.MAJOR_COMPACTION
-    } else {
+    } else if (alterTableModel.compactionType
+      .equalsIgnoreCase(CompactionType.IUD_UPDDEL_DELTA_COMPACTION.toString)) {
+      compactionType = CompactionType.IUD_UPDDEL_DELTA_COMPACTION
+      if (alterTableModel.segmentUpdateStatusManager.get != None) {
+        carbonLoadModel
+          .setSegmentUpdateStatusManager((alterTableModel.segmentUpdateStatusManager.get))
+        carbonLoadModel
+          .setSegmentUpdateDetails(alterTableModel.segmentUpdateStatusManager.get
+            .getUpdateStatusDetails.toList.asJava)
+        carbonLoadModel
+          .setLoadMetadataDetails(alterTableModel.segmentUpdateStatusManager.get
+            .getLoadMetadataDetails.toList.asJava)
+      }
+    }
+    else {
       compactionType = CompactionType.MINOR_COMPACTION
     }
 
@@ -690,7 +704,7 @@ object CarbonDataRDDFactory {
               val index = taskNo + 1
               uniqueLoadStatusId = carbonLoadModel.getTableName +
                                    CarbonCommonConstants.UNDERSCORE +
-                                   index
+                                   (index + "_0")
 
               // convert timestamp
               val timeStampInLong = updateModel.get.updatedTimeStamp + ""
@@ -959,8 +973,13 @@ object CarbonDataRDDFactory {
 
         shutDownDictionaryServer(carbonLoadModel, result)
 
-        LOGGER.audit("Data load is successful for " +
-            s"${ carbonLoadModel.getDatabaseName }.${ carbonLoadModel.getTableName }")
+        if (CarbonCommonConstants.STORE_LOADSTATUS_PARTIAL_SUCCESS.equals(loadStatus)) {
+          LOGGER.audit("Data load is partially successful for " +
+                       s"${ carbonLoadModel.getDatabaseName }.${ carbonLoadModel.getTableName }")
+        } else {
+          LOGGER.audit("Data load is successful for " +
+                       s"${ carbonLoadModel.getDatabaseName }.${ carbonLoadModel.getTableName }")
+        }
         try {
           // compaction handling
           handleSegmentMerging(tableCreationTime)

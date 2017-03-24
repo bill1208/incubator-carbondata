@@ -51,6 +51,7 @@ import org.apache.carbondata.core.keygenerator.directdictionary.DirectDictionary
 import org.apache.carbondata.core.keygenerator.factory.KeyGeneratorFactory;
 import org.apache.carbondata.core.metadata.CarbonMetadata;
 import org.apache.carbondata.core.metadata.datatype.DataType;
+import org.apache.carbondata.core.metadata.encoder.Encoding;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonMeasure;
@@ -71,7 +72,7 @@ import org.apache.carbondata.processing.schema.metadata.ColumnSchemaDetailsWrapp
 import org.apache.carbondata.processing.schema.metadata.ColumnsInfo;
 import org.apache.carbondata.processing.schema.metadata.HierarchiesInfo;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
-import org.apache.carbondata.processing.util.RemoveDictionaryUtil;
+import org.apache.carbondata.processing.util.NonDictionaryUtil;
 import static org.apache.carbondata.processing.constants.TableOptionConstant.BAD_RECORDS_ACTION;
 import static org.apache.carbondata.processing.constants.TableOptionConstant.BAD_RECORDS_LOGGER_ENABLE;
 import static org.apache.carbondata.processing.constants.TableOptionConstant.SERIALIZATION_NULL_FORMAT;
@@ -266,6 +267,9 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
    * dimension column ids
    */
   private String[] dimensionColumnIds;
+
+  private Trans dis;
+
   /**
    * Constructor
    *
@@ -279,6 +283,8 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
       TransMeta t, Trans dis) {
     super(s, stepDataInterface, c, t, dis);
     csvFilepath = dis.getVariable("csvInputFilePath");
+    this.dis = dis;
+
   }
 
   /**
@@ -442,6 +448,7 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
         boolean badRecordsLoggerEnable;
         boolean badRecordsLogRedirect = false;
         boolean badRecordConvertNullDisable = false;
+        boolean isDataLoadFail = false;
         badRecordsLoggerEnable = Boolean
             .parseBoolean(meta.getTableOptionWrapper().get(BAD_RECORDS_LOGGER_ENABLE.getName()));
         String bad_records_action =
@@ -465,13 +472,17 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
               badRecordsLogRedirect = false;
               badRecordConvertNullDisable = true;
               break;
+            case FAIL:
+              isDataLoadFail = true;
+              break;
           }
         }
         String key = meta.getDatabaseName() + '/' + meta.getTableName() +
             '_' + meta.getTableName();
         badRecordsLogger = new BadRecordsLogger(key, csvFilepath, getBadLogStoreLocation(
             meta.getDatabaseName() + '/' + meta.getTableName() + "/" + meta.getTaskNo()),
-            badRecordsLogRedirect, badRecordsLoggerEnable, badRecordConvertNullDisable);
+            badRecordsLogRedirect, badRecordsLoggerEnable, badRecordConvertNullDisable,
+            isDataLoadFail);
         HashMap<String, String> dateformatsHashMap = new HashMap<String, String>();
         if (meta.dateFormat != null) {
           String[] dateformats = meta.dateFormat.split(CarbonCommonConstants.COMMA);
@@ -923,13 +934,15 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
       Object[] out = populateOutputRow(r);
       if (out != null) {
         for (int i = 0; i < meta.normLength - meta.complexTypes.size(); i++) {
-          if (null == RemoveDictionaryUtil.getDimension(i, out)) {
-            RemoveDictionaryUtil.setDimension(i, 1, out);
+          if (null == NonDictionaryUtil.getDimension(i, out)) {
+            NonDictionaryUtil.setDimension(i, 1, out);
           }
         }
       }
       return out;
 
+    } catch (KettleException e) {
+      throw new RuntimeException(e);
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
@@ -988,6 +1001,7 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
                 isStringDataType[j], byteBufferArr);
         if (!isSerialized && !isStringDataType[j] && CarbonCommonConstants.MEMBER_DEFAULT_VAL
             .equals(dimensionValue)) {
+          failDataLoad(r, index, columnName, msrDataType[meta.msrMapping[msrCount]].name());
           addEntryToBadRecords(r, j, columnName, dataTypes[j]);
           if (badRecordsLogger.isBadRecordConvertNullDisable()) {
             return null;
@@ -1023,6 +1037,8 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
           out[memberMapping[dimLen + index]] = surrogate.doubleValue();
         } else if (!isSerialized &&  (isNull || msr == null
             || msr.length() == 0)) {
+          failDataLoad(r, index, columnName,
+              msrDataType[meta.msrMapping[msrCount]].name());
           addEntryToBadRecords(r, j, columnName,
               msrDataType[meta.msrMapping[msrCount]].name());
           if (badRecordsLogger.isBadRecordConvertNullDisable()) {
@@ -1047,6 +1063,8 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
                   measureValueBasedOnDataType;
             }
           } catch (NumberFormatException e) {
+            failDataLoad(r, index, columnName,
+                msrDataType[meta.msrMapping[msrCount]].name());
             addEntryToBadRecords(r, j, columnName, msrDataType[meta.msrMapping[msrCount]].name());
             if (badRecordsLogger.isBadRecordConvertNullDisable()) {
               return null;
@@ -1208,8 +1226,8 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
               surrogateKeyForHrrchy[0] =
                   directDictionaryGenerators[m].generateDirectSurrogateKey(tuple);
               if (!isSerialized && surrogateKeyForHrrchy[0] == 1) {
-                addEntryToBadRecords(r, j, columnName,
-                    details.getColumnType().name());
+                failDataLoad(r, index, columnName, details.getColumnType().getName());
+                addEntryToBadRecords(r, j, columnName, details.getColumnType().name());
                 if (badRecordsLogger.isBadRecordConvertNullDisable()) {
                   return null;
                 }
@@ -1230,6 +1248,12 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
           if (surrogateKeyForHrrchy[0] == CarbonCommonConstants.INVALID_SURROGATE_KEY) {
 
             if (!isSerialized) {
+              int m = j;
+              if (isPresentInSchema) {
+                m = presentColumnMapIndex[j];
+              }
+              ColumnSchemaDetails details = columnSchemaDetailsWrapper.get(dimensionColumnIds[m]);
+              failDataLoad(r, index, columnName, details.getColumnType().getName());
               addEntryToBadRecords(r, j, columnName);
               if (badRecordsLogger.isBadRecordConvertNullDisable()) {
                 return null;
@@ -1255,10 +1279,20 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
     }
 
     insertHierIfRequired(out);
-    RemoveDictionaryUtil
+    NonDictionaryUtil
         .prepareOut(newArray, byteBufferArr, out, dimLen - meta.complexTypes.size());
 
     return newArray;
+  }
+
+  private void failDataLoad(Object[] row, int index, String columnName, String dataType)
+      throws KettleException {
+    if (badRecordsLogger.isDataLoadFail()) {
+      String errorMessage = getBadRecordEntry(row, index, columnName, dataType);
+      dis.setVariable(CarbonCommonConstants.BAD_RECORD_KEY, errorMessage);
+      LOGGER.error("Data load failed due to bad record. " + errorMessage);
+      throw new KettleException("Data load failed due to bad record");
+    }
   }
 
   private void addEntryToBadRecords(Object[] r, int j, String columnName, String dataType) {
@@ -1266,6 +1300,13 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
     badRecordsLogger.addBadRecordsToBuilder(r,
         "The value " + " \"" + r[j] + "\"" + " with column name " + columnName
             + " and column data type " + dataType + " is not a valid " + dataType + " type.");
+  }
+
+  private String getBadRecordEntry(Object[] r, int j, String columnName, String dataType) {
+    dataType = DataTypeUtil.getColumnDataTypeDisplayName(dataType);
+    String badRecord = "The value " + " \"" + r[j] + "\"" + " with column name " + columnName
+        + " and column data type " + dataType + " is not a valid Record";
+    return badRecord;
   }
 
   private void addEntryToBadRecords(Object[] r, int j, String columnName) {
@@ -1933,7 +1974,10 @@ public class CarbonCSVBasedSeqGenStep extends BaseStep {
       dimListExcludingNoDictionaryColumn =
           new ArrayList<>(dimensionsList.size() - meta.noDictionaryCols.length);
       for (CarbonDimension dimension : dimensionsList) {
-        if (!dimension.getEncoder().isEmpty()) {
+        // Here if dimension.getEncoder() lnly contains Encoding.INVERTED_INDEX, it
+        // means that NoDicColumn using InvertedIndex, so not put it into dic dims list.
+        if (!dimension.getEncoder().isEmpty() && !((1 == dimension.getEncoder().size()) &&
+            dimension.getEncoder().contains(Encoding.INVERTED_INDEX))) {
           dimListExcludingNoDictionaryColumn.add(dimension);
         }
       }
