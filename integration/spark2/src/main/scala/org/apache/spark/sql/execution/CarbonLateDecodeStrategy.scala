@@ -61,11 +61,18 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
             a.map(_.name).toArray, f), needDecoder)) ::
             Nil
       case CarbonDictionaryCatalystDecoder(relations, profile, aliasMap, _, child) =>
-        CarbonDictionaryDecoder(relations,
-          profile,
-          aliasMap,
-          planLater(child)
-        ) :: Nil
+        if ((profile.isInstanceOf[IncludeProfile] && profile.isEmpty) ||
+            !CarbonDictionaryDecoder.
+              isRequiredToDecode(CarbonDictionaryDecoder.
+                getDictionaryColumnMapping(child.output, relations, profile, aliasMap))) {
+          planLater(child) :: Nil
+        } else {
+          CarbonDictionaryDecoder(relations,
+            profile,
+            aliasMap,
+            planLater(child)
+          ) :: Nil
+        }
       case _ => Nil
     }
   }

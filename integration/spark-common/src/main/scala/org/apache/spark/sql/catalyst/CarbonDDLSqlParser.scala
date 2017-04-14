@@ -150,12 +150,12 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
   protected val DECIMAL = carbonKeyWord("DECIMAL")
   protected val DOUBLE = carbonKeyWord("DOUBLE")
   protected val FLOAT = carbonKeyWord("FLOAT")
-  protected val SHORT = carbonKeyWord("SMALLINT")
+  protected val SHORT = carbonKeyWord("SHORT")
   protected val INT = carbonKeyWord("INT")
   protected val BIGINT = carbonKeyWord("BIGINT")
   protected val ARRAY = carbonKeyWord("ARRAY")
   protected val STRUCT = carbonKeyWord("STRUCT")
-
+  protected val SMALLINT = carbonKeyWord("SMALLINT")
   protected val CHANGE = carbonKeyWord("CHANGE")
   protected val TBLPROPERTIES = carbonKeyWord("TBLPROPERTIES")
 
@@ -751,7 +751,7 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
     val supportedOptions = Seq("DELIMITER", "QUOTECHAR", "FILEHEADER", "ESCAPECHAR", "MULTILINE",
       "COMPLEX_DELIMITER_LEVEL_1", "COMPLEX_DELIMITER_LEVEL_2", "COLUMNDICT",
       "SERIALIZATION_NULL_FORMAT", "BAD_RECORDS_LOGGER_ENABLE", "BAD_RECORDS_ACTION",
-      "ALL_DICTIONARY_PATH", "MAXCOLUMNS", "COMMENTCHAR", "USE_KETTLE", "DATEFORMAT",
+      "ALL_DICTIONARY_PATH", "MAXCOLUMNS", "COMMENTCHAR", "DATEFORMAT",
       "SINGLE_PASS", "IS_EMPTY_DATA_BAD_RECORD"
     )
     var isSupported = true
@@ -856,7 +856,7 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
   protected lazy val primitiveTypes =
     STRING ^^^ "string" | INTEGER ^^^ "integer" |
     TIMESTAMP ^^^ "timestamp" | NUMERIC ^^^ "numeric" |
-    BIGINT ^^^ "bigint" | SHORT ^^^ "smallint" |
+    BIGINT ^^^ "bigint" | (SHORT | SMALLINT) ^^^ "smallint" |
     INT ^^^ "int" | DOUBLE ^^^ "double" | FLOAT ^^^ "double" | decimalType |
     DATE ^^^ "date" | charType
 
@@ -873,9 +873,12 @@ abstract class CarbonDDLSqlParser extends AbstractCarbonSparkSQLParser {
    * Matching the decimal(10,0) data type and returning the same.
    */
   private lazy val decimalType =
-  DECIMAL ~ ("(" ~> numericLit <~ ",") ~ (numericLit <~ ")") ^^ {
-    case decimal ~ precision ~ scale =>
-      s"$decimal($precision, $scale)"
+  DECIMAL ~ (("(" ~> numericLit <~ ",") ~ (numericLit <~ ")")).? ^^ {
+    case decimal ~ precisionAndScale => if (precisionAndScale.isDefined) {
+      s"$decimal(${ precisionAndScale.get._1 }, ${ precisionAndScale.get._2 })"
+    } else {
+      s"$decimal(10,0)"
+    }
   }
 
   protected lazy val nestedType: Parser[Field] = structFieldType | arrayFieldType |

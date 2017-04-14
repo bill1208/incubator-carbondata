@@ -103,11 +103,13 @@ public class HdfsFileLock extends AbstractCarbonLock {
    */
   @Override
   public boolean unlock() {
+    boolean status = false;
     if (null != dataOutputStream) {
       try {
         dataOutputStream.close();
+        status = true;
       } catch (IOException e) {
-        return false;
+        status = false;
       } finally {
         CarbonFile carbonFile =
             FileFactory.getCarbonFile(location, FileFactory.getFileType(location));
@@ -116,14 +118,16 @@ public class HdfsFileLock extends AbstractCarbonLock {
             LOGGER.info("Deleted the lock file " + location);
           } else {
             LOGGER.error("Not able to delete the lock file " + location);
+            status = false;
           }
         } else {
           LOGGER.error("Not able to delete the lock file because "
               + "it is not existed in location " + location);
+          status = false;
         }
       }
     }
-    return true;
+    return status;
   }
 
 }

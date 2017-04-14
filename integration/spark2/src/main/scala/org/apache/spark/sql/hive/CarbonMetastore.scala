@@ -53,7 +53,7 @@ import org.apache.carbondata.core.util.{CarbonProperties, CarbonTimeStatisticsFa
 import org.apache.carbondata.core.util.path.{CarbonStorePath, CarbonTablePath}
 import org.apache.carbondata.core.writer.ThriftWriter
 import org.apache.carbondata.format.{SchemaEvolutionEntry, TableInfo}
-import org.apache.carbondata.spark.merger.TableMeta
+import org.apache.carbondata.processing.merger.TableMeta
 import org.apache.carbondata.spark.util.CarbonSparkUtil
 
 case class MetaData(var tablesMeta: ArrayBuffer[TableMeta]) {
@@ -200,23 +200,23 @@ class CarbonMetastore(conf: RuntimeConfig, val storePath: String) {
     val statistic = new QueryStatistic()
     // creating zookeeper instance once.
     // if zookeeper is configured as carbon lock type.
-    val zookeeperUrl: String = conf.get(CarbonCommonConstants.ZOOKEEPER_URL, null)
-    if (zookeeperUrl != null) {
-      CarbonProperties.getInstance.addProperty(CarbonCommonConstants.ZOOKEEPER_URL, zookeeperUrl)
-      ZookeeperInit.getInstance(zookeeperUrl)
-      LOGGER.info("Zookeeper url is configured. Taking the zookeeper as lock type.")
-      var configuredLockType = CarbonProperties.getInstance
-        .getProperty(CarbonCommonConstants.LOCK_TYPE)
-      if (null == configuredLockType) {
-        configuredLockType = CarbonCommonConstants.CARBON_LOCK_TYPE_ZOOKEEPER
-        CarbonProperties.getInstance
-          .addProperty(CarbonCommonConstants.LOCK_TYPE,
-            configuredLockType)
-      }
+    val zookeeperurl = conf.get(CarbonCommonConstants.ZOOKEEPER_URL, null)
+    if (null != zookeeperurl) {
+      CarbonProperties.getInstance
+        .addProperty(CarbonCommonConstants.ZOOKEEPER_URL, zookeeperurl)
     }
-
     if (metadataPath == null) {
       return null
+    }
+    // if no locktype is configured and store type is HDFS set HDFS lock as default
+    if (null == CarbonProperties.getInstance
+      .getProperty(CarbonCommonConstants.LOCK_TYPE) &&
+        FileType.HDFS == FileFactory.getFileType(metadataPath)) {
+      CarbonProperties.getInstance
+        .addProperty(CarbonCommonConstants.LOCK_TYPE,
+          CarbonCommonConstants.CARBON_LOCK_TYPE_HDFS
+        )
+      LOGGER.info("Default lock type HDFSLOCK is configured")
     }
     val fileType = FileFactory.getFileType(metadataPath)
     val metaDataBuffer = new ArrayBuffer[TableMeta]
@@ -301,7 +301,7 @@ class CarbonMetastore(conf: RuntimeConfig, val storePath: String) {
   }
 
   /**
-   * This method will overwrite the existing schema and update it with the gievn details
+   * This method will overwrite the existing schema and update it with the given details
    *
    * @param carbonTableIdentifier
    * @param thriftTableInfo
@@ -315,17 +315,45 @@ class CarbonMetastore(conf: RuntimeConfig, val storePath: String) {
       carbonStorePath: String)
     (sparkSession: SparkSession): String = {
     val schemaConverter = new ThriftWrapperSchemaConverterImpl
+    thriftTableInfo.fact_table.schema_evolution.schema_evolution_history.add(schemaEvolutionEntry)
     val wrapperTableInfo = schemaConverter
       .fromExternalToWrapperTableInfo(thriftTableInfo,
-        carbonTableIdentifier.getDatabaseName,
-        carbonTableIdentifier.getTableName,
-        carbonStorePath)
-    thriftTableInfo.fact_table.schema_evolution.schema_evolution_history.add(schemaEvolutionEntry)
+          carbonTableIdentifier.getDatabaseName,
+          carbonTableIdentifier.getTableName,
+          carbonStorePath)
     createSchemaThriftFile(wrapperTableInfo,
       thriftTableInfo,
       carbonTableIdentifier.getDatabaseName,
       carbonTableIdentifier.getTableName)(sparkSession)
   }
+
+  /**
+   * This method will is used to remove the evolution entry in case of failure.
+   *
+   * @param carbonTableIdentifier
+   * @param thriftTableInfo
+   * @param carbonStorePath
+   * @param sparkSession
+   */
+  def revertTableSchema(carbonTableIdentifier: CarbonTableIdentifier,
+      thriftTableInfo: org.apache.carbondata.format.TableInfo,
+      carbonStorePath: String)
+    (sparkSession: SparkSession): String = {
+    val schemaConverter = new ThriftWrapperSchemaConverterImpl
+    val wrapperTableInfo = schemaConverter
+      .fromExternalToWrapperTableInfo(thriftTableInfo,
+        carbonTableIdentifier.getDatabaseName,
+        carbonTableIdentifier.getTableName,
+        carbonStorePath)
+    val evolutionEntries = thriftTableInfo.fact_table.schema_evolution.schema_evolution_history
+    evolutionEntries.remove(evolutionEntries.size() - 1)
+    createSchemaThriftFile(wrapperTableInfo,
+      thriftTableInfo,
+      carbonTableIdentifier.getDatabaseName,
+      carbonTableIdentifier.getTableName)(sparkSession)
+  }
+
+
 
   /**
    *
@@ -657,7 +685,7 @@ class CarbonMetastore(conf: RuntimeConfig, val storePath: String) {
   }
 
   def createDatabaseDirectory(dbName: String) {
-    val databasePath = storePath + File.separator + dbName
+    val databasePath = storePath + File.separator + dbName.toLowerCase
     val fileType = FileFactory.getFileType(databasePath)
     FileFactory.mkdirs(databasePath, fileType)
   }

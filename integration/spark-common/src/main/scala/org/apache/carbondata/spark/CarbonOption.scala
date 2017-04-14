@@ -44,13 +44,13 @@ class CarbonOption(options: Map[String, String]) {
 
   def compress: Boolean = options.getOrElse("compress", "false").toBoolean
 
-  def useKettle: Boolean = options.getOrElse("use_kettle", "false").toBoolean
-
   def singlePass: Boolean = options.getOrElse("single_pass", "false").toBoolean
 
   def dictionaryInclude: Option[String] = options.get("dictionary_include")
 
   def dictionaryExclude: Option[String] = options.get("dictionary_exclude")
+
+  def tableBlockSize: Option[String] = options.get("table_blocksize")
 
   def bucketNumber: Int = options.getOrElse("bucketnumber", "0").toInt
 

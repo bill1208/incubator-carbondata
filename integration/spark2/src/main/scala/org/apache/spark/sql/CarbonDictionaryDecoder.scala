@@ -57,28 +57,8 @@ case class CarbonDictionaryDecoder(
     child.outputPartitioning
   }
 
-  val getDictionaryColumnIds: Array[(String, ColumnIdentifier, CarbonDimension)] = {
-    child.output.map { attribute =>
-      val attr = aliasMap.getOrElse(attribute, attribute)
-      val relation = relations.find(p => p.contains(attr))
-      if (relation.isDefined && CarbonDictionaryDecoder.canBeDecoded(attr, profile)) {
-        val carbonTable = relation.get.carbonRelation.carbonRelation.metaData.carbonTable
-        val carbonDimension =
-          carbonTable.getDimensionByName(carbonTable.getFactTableName, attr.name)
-        if (carbonDimension != null &&
-            carbonDimension.hasEncoding(Encoding.DICTIONARY) &&
-            !carbonDimension.hasEncoding(Encoding.DIRECT_DICTIONARY) &&
-            !carbonDimension.isComplex) {
-          (carbonTable.getFactTableName, carbonDimension.getColumnIdentifier,
-            carbonDimension)
-        } else {
-          (null, null, null)
-        }
-      } else {
-        (null, null, null)
-      }
-    }.toArray
-  }
+  val getDictionaryColumnIds: Array[(String, ColumnIdentifier, CarbonDimension)] =
+    CarbonDictionaryDecoder.getDictionaryColumnMapping(child.output, relations, profile, aliasMap)
 
   override def doExecute(): RDD[InternalRow] = {
     attachTree(this, "execute") {
@@ -88,7 +68,7 @@ case class CarbonDictionaryDecoder(
         (carbonTable.getFactTableName, carbonTable.getAbsoluteTableIdentifier)
       }.toMap
 
-      if (isRequiredToDecode) {
+      if (CarbonDictionaryDecoder.isRequiredToDecode(getDictionaryColumnIds)) {
         val dataTypes = child.output.map { attr => attr.dataType }
         child.execute().mapPartitions { iter =>
           val cacheProvider: CacheProvider = CacheProvider.getInstance
@@ -142,7 +122,7 @@ case class CarbonDictionaryDecoder(
       (carbonTable.getFactTableName, carbonTable.getAbsoluteTableIdentifier)
     }.toMap
 
-    if (isRequiredToDecode) {
+    if (CarbonDictionaryDecoder.isRequiredToDecode(getDictionaryColumnIds)) {
       val cacheProvider: CacheProvider = CacheProvider.getInstance
       val forwardDictionaryCache: Cache[DictionaryColumnUniqueIdentifier, Dictionary] =
         cacheProvider.createCache(CacheType.FORWARD_DICTIONARY, storePath)
@@ -255,13 +235,6 @@ case class CarbonDictionaryDecoder(
     child.asInstanceOf[CodegenSupport].produce(ctx, this)
   }
 
-  private def isRequiredToDecode = {
-    getDictionaryColumnIds.find(p => p._1 != null) match {
-      case Some(value) => true
-      case _ => false
-    }
-  }
-
   private def getDictionary(atiMap: Map[String, AbsoluteTableIdentifier],
       cache: Cache[DictionaryColumnUniqueIdentifier, Dictionary]) = {
     val dicts: Seq[Dictionary] = getDictionaryColumnIds.map { f =>
@@ -347,11 +320,42 @@ object CarbonDictionaryDecoder {
   }
 
   /**
+   * Updates all dictionary attributes with integer datatype.
+   */
+  def updateAttributes(output: Seq[Attribute],
+      relations: Seq[CarbonDecoderRelation],
+      aliasMap: CarbonAliasDecoderRelation): Seq[Attribute] = {
+    output.map { a =>
+      val attr = aliasMap.getOrElse(a, a)
+      val relation = relations.find(p => p.contains(attr))
+      if (relation.isDefined) {
+        val carbonTable = relation.get.carbonRelation.carbonRelation.metaData.carbonTable
+        val carbonDimension = carbonTable
+          .getDimensionByName(carbonTable.getFactTableName, attr.name)
+        if (carbonDimension != null &&
+            carbonDimension.hasEncoding(Encoding.DICTIONARY) &&
+            !carbonDimension.hasEncoding(Encoding.DIRECT_DICTIONARY) &&
+            !carbonDimension.isComplex()) {
+          val newAttr = AttributeReference(a.name,
+            IntegerType,
+            a.nullable,
+            a.metadata)(a.exprId).asInstanceOf[Attribute]
+          newAttr
+        } else {
+          a
+        }
+      } else {
+        a
+      }
+    }
+  }
+
+  /**
    * Whether the attributed requires to decode or not based on the profile.
    */
   def canBeDecoded(attr: Attribute, profile: CarbonProfile): Boolean = {
     profile match {
-      case ip: IncludeProfile if ip.attributes.nonEmpty =>
+      case ip: IncludeProfile =>
         ip.attributes
           .exists(a => a.name.equalsIgnoreCase(attr.name) && a.exprId == attr.exprId)
       case ep: ExcludeProfile =>
@@ -389,6 +393,39 @@ object CarbonDictionaryDecoder {
       case DataType.ARRAY =>
         CarbonMetastoreTypes
           .toDataType(s"array<${ relation.getArrayChildren(carbonDimension.getColName) }>")
+    }
+  }
+
+  def getDictionaryColumnMapping(output: Seq[Attribute],
+      relations: Seq[CarbonDecoderRelation],
+      profile: CarbonProfile,
+      aliasMap: CarbonAliasDecoderRelation): Array[(String, ColumnIdentifier, CarbonDimension)] = {
+    output.map { attribute =>
+      val attr = aliasMap.getOrElse(attribute, attribute)
+      val relation = relations.find(p => p.contains(attr))
+      if (relation.isDefined && CarbonDictionaryDecoder.canBeDecoded(attr, profile)) {
+        val carbonTable = relation.get.carbonRelation.carbonRelation.metaData.carbonTable
+        val carbonDimension =
+          carbonTable.getDimensionByName(carbonTable.getFactTableName, attr.name)
+        if (carbonDimension != null &&
+            carbonDimension.hasEncoding(Encoding.DICTIONARY) &&
+            !carbonDimension.hasEncoding(Encoding.DIRECT_DICTIONARY) &&
+            !carbonDimension.isComplex) {
+          (carbonTable.getFactTableName, carbonDimension.getColumnIdentifier,
+            carbonDimension)
+        } else {
+          (null, null, null)
+        }
+      } else {
+        (null, null, null)
+      }
+    }.toArray
+  }
+
+  def isRequiredToDecode(colIdents: Array[(String, ColumnIdentifier, CarbonDimension)]): Boolean = {
+    colIdents.find(p => p._1 != null) match {
+      case Some(value) => true
+      case _ => false
     }
   }
 }

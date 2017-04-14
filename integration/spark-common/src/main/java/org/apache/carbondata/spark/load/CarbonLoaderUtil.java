@@ -36,6 +36,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
@@ -67,16 +70,9 @@ import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.path.CarbonStorePath;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
-import org.apache.carbondata.processing.api.dataloader.DataLoadModel;
-import org.apache.carbondata.processing.api.dataloader.SchemaInfo;
-import org.apache.carbondata.processing.csvload.DataGraphExecuter;
-import org.apache.carbondata.processing.dataprocessor.DataProcessTaskStatus;
-import org.apache.carbondata.processing.dataprocessor.IDataProcessStatus;
-import org.apache.carbondata.processing.graphgenerator.GraphGenerator;
-import org.apache.carbondata.processing.graphgenerator.GraphGeneratorException;
+import org.apache.carbondata.processing.merger.NodeBlockRelation;
+import org.apache.carbondata.processing.merger.NodeMultiBlockRelation;
 import org.apache.carbondata.processing.model.CarbonLoadModel;
-import org.apache.carbondata.spark.merger.NodeBlockRelation;
-import org.apache.carbondata.spark.merger.NodeMultiBlockRelation;
 
 import com.google.gson.Gson;
 import org.apache.spark.SparkConf;
@@ -90,97 +86,7 @@ public final class CarbonLoaderUtil {
   private CarbonLoaderUtil() {
   }
 
-  private static void generateGraph(IDataProcessStatus dataProcessTaskStatus, SchemaInfo info,
-      CarbonLoadModel loadModel, String outputLocation)
-      throws GraphGeneratorException {
-    DataLoadModel model = new DataLoadModel();
-    model.setCsvLoad(null != dataProcessTaskStatus.getCsvFilePath()
-            || null != dataProcessTaskStatus.getFilesToProcess());
-    model.setSchemaInfo(info);
-    model.setTableName(dataProcessTaskStatus.getTableName());
-    List<LoadMetadataDetails> loadMetadataDetails = loadModel.getLoadMetadataDetails();
-    model.setBlocksID(dataProcessTaskStatus.getBlocksID());
-    model.setEscapeCharacter(dataProcessTaskStatus.getEscapeCharacter());
-    model.setQuoteCharacter(dataProcessTaskStatus.getQuoteCharacter());
-    model.setCommentCharacter(dataProcessTaskStatus.getCommentCharacter());
-    model.setRddIteratorKey(dataProcessTaskStatus.getRddIteratorKey());
-    model.setTaskNo(loadModel.getTaskNo());
-    model.setFactTimeStamp(loadModel.getFactTimeStamp());
-    model.setMaxColumns(loadModel.getMaxColumns());
-    model.setDateFormat(loadModel.getDateFormat());
-    GraphGenerator generator = new GraphGenerator(model, loadModel.getPartitionId(),
-        loadModel.getStorePath(), loadModel.getCarbonDataLoadSchema(), loadModel.getSegmentId(),
-        outputLocation);
-    generator.generateGraph();
-  }
 
-  public static void executeGraph(CarbonLoadModel loadModel, String storeLocation,
-      String storePath, String kettleHomePath) throws Exception {
-    System.setProperty("KETTLE_HOME", kettleHomePath);
-    if (!new File(storeLocation).mkdirs()) {
-      LOGGER.error("Error while creating the temp store path: " + storeLocation);
-    }
-    String outPutLoc = storeLocation + "/etl";
-    String databaseName = loadModel.getDatabaseName();
-    String tableName = loadModel.getTableName();
-    String tempLocationKey = databaseName + CarbonCommonConstants.UNDERSCORE + tableName
-        + CarbonCommonConstants.UNDERSCORE + loadModel.getTaskNo();
-    CarbonProperties.getInstance().addProperty(tempLocationKey, storeLocation);
-    CarbonProperties.getInstance()
-        .addProperty(CarbonCommonConstants.STORE_LOCATION_HDFS, storePath);
-    // CarbonProperties.getInstance().addProperty("store_output_location", outPutLoc);
-    CarbonProperties.getInstance().addProperty("send.signal.load", "false");
-
-    String fileNamePrefix = "";
-    if (loadModel.isAggLoadRequest()) {
-      fileNamePrefix = "graphgenerator";
-    }
-    String graphPath =
-        outPutLoc + File.separator + databaseName + File.separator + tableName + File.separator
-            + loadModel.getSegmentId() + File.separator + loadModel.getTaskNo() + File.separator
-            + tableName + fileNamePrefix + ".ktr";
-    File path = new File(graphPath);
-    if (path.exists()) {
-      path.delete();
-    }
-
-    DataProcessTaskStatus dataProcessTaskStatus
-            = new DataProcessTaskStatus(databaseName, tableName);
-    dataProcessTaskStatus.setCsvFilePath(loadModel.getFactFilePath());
-    if (loadModel.isDirectLoad()) {
-      dataProcessTaskStatus.setFilesToProcess(loadModel.getFactFilesToProcess());
-      dataProcessTaskStatus.setDirectLoad(true);
-      dataProcessTaskStatus.setCsvDelimiter(loadModel.getCsvDelimiter());
-      dataProcessTaskStatus.setCsvHeader(loadModel.getCsvHeader());
-    }
-
-    dataProcessTaskStatus.setBlocksID(loadModel.getBlocksID());
-    dataProcessTaskStatus.setEscapeCharacter(loadModel.getEscapeChar());
-    dataProcessTaskStatus.setQuoteCharacter(loadModel.getQuoteChar());
-    dataProcessTaskStatus.setCommentCharacter(loadModel.getCommentChar());
-    dataProcessTaskStatus.setRddIteratorKey(loadModel.getRddIteratorKey());
-    dataProcessTaskStatus.setDateFormat(loadModel.getDateFormat());
-    SchemaInfo info = new SchemaInfo();
-    info.setDatabaseName(databaseName);
-    info.setTableName(tableName);
-    info.setAutoAggregateRequest(loadModel.isAggLoadRequest());
-    info.setComplexDelimiterLevel1(loadModel.getComplexDelimiterLevel1());
-    info.setComplexDelimiterLevel2(loadModel.getComplexDelimiterLevel2());
-    info.setSerializationNullFormat(loadModel.getSerializationNullFormat());
-    info.setBadRecordsLoggerEnable(loadModel.getBadRecordsLoggerEnable());
-    info.setBadRecordsLoggerAction(loadModel.getBadRecordsAction());
-
-    generateGraph(dataProcessTaskStatus, info, loadModel, outPutLoc);
-
-    DataGraphExecuter graphExecuter = new DataGraphExecuter(dataProcessTaskStatus);
-    graphExecuter
-        .executeGraph(graphPath, info, loadModel.getCarbonDataLoadSchema());
-  }
-
-  public static List<String> addNewSliceNameToList(String newSlice, List<String> activeSlices) {
-    activeSlices.add(newSlice);
-    return activeSlices;
-  }
 
   public static void deleteSegment(CarbonLoadModel loadModel, int currentLoad) {
     CarbonTable carbonTable = loadModel.getCarbonDataLoadSchema().getCarbonTable();
@@ -252,43 +158,6 @@ public final class CarbonLoaderUtil {
     }
   }
 
-  public static List<String> getListOfValidSlices(LoadMetadataDetails[] details) {
-    List<String> activeSlices =
-        new ArrayList<String>(CarbonCommonConstants.DEFAULT_COLLECTION_SIZE);
-    for (LoadMetadataDetails oneLoad : details) {
-      if (CarbonCommonConstants.STORE_LOADSTATUS_SUCCESS.equals(oneLoad.getLoadStatus())
-          || CarbonCommonConstants.STORE_LOADSTATUS_PARTIAL_SUCCESS.equals(oneLoad.getLoadStatus())
-          || CarbonCommonConstants.MARKED_FOR_UPDATE.equals(oneLoad.getLoadStatus())) {
-        if (null != oneLoad.getMergedLoadName()) {
-          String loadName = CarbonCommonConstants.LOAD_FOLDER + oneLoad.getMergedLoadName();
-          activeSlices.add(loadName);
-        } else {
-          String loadName = CarbonCommonConstants.LOAD_FOLDER + oneLoad.getLoadName();
-          activeSlices.add(loadName);
-        }
-      }
-    }
-    return activeSlices;
-  }
-
-  public static List<String> getListOfUpdatedSlices(LoadMetadataDetails[] details) {
-    List<String> updatedSlices =
-        new ArrayList<String>(CarbonCommonConstants.DEFAULT_COLLECTION_SIZE);
-    for (LoadMetadataDetails oneLoad : details) {
-      if (CarbonCommonConstants.MARKED_FOR_UPDATE.equals(oneLoad.getLoadStatus())) {
-        if (null != oneLoad.getMergedLoadName()) {
-          updatedSlices.add(oneLoad.getMergedLoadName());
-        } else {
-          updatedSlices.add(oneLoad.getLoadName());
-        }
-      }
-    }
-    return updatedSlices;
-  }
-
-  public static void removeSliceFromMemory(String databaseName, String tableName, String loadName) {
-    // TODO: Remove from memory
-  }
 
   /**
    * This method will delete the local data load folder location after data load is complete
@@ -305,30 +174,32 @@ public final class CarbonLoaderUtil {
       tempLocationKey = CarbonCommonConstants.COMPACTION_KEY_WORD + '_' + tempLocationKey;
     }
     // form local store location
-    String localStoreLocation = CarbonProperties.getInstance()
+    final String localStoreLocation = CarbonProperties.getInstance()
         .getProperty(tempLocationKey, CarbonCommonConstants.STORE_LOCATION_DEFAULT_VAL);
+    // submit local folder clean up in another thread so that main thread execution is not blocked
+    ExecutorService localFolderDeletionService = Executors.newFixedThreadPool(1);
     try {
-      CarbonUtil.deleteFoldersAndFiles(new File(localStoreLocation).getParentFile());
-      LOGGER.info("Deleted the local store location" + localStoreLocation);
-    } catch (IOException | InterruptedException e) {
-      LOGGER.error(e, "Failed to delete local data load folder location");
+      localFolderDeletionService.submit(new Callable<Void>() {
+        @Override public Void call() throws Exception {
+          try {
+            long startTime = System.currentTimeMillis();
+            File file = new File(localStoreLocation);
+            CarbonUtil.deleteFoldersAndFiles(file);
+            LOGGER.info(
+                "Deleted the local store location" + localStoreLocation + " : TIme taken: " + (
+                    System.currentTimeMillis() - startTime));
+          } catch (IOException | InterruptedException e) {
+            LOGGER.error(e, "Failed to delete local data load folder location");
+          }
+          return null;
+        }
+      });
+    } finally {
+      if (null != localFolderDeletionService) {
+        localFolderDeletionService.shutdown();
+      }
     }
 
-  }
-
-  /**
-   * This method will get the store location for the given path, segemnt id and partition id
-   *
-   * @param storePath
-   * @param carbonTableIdentifier
-   * @param segmentId
-   * @return
-   */
-  public static String getStoreLocation(String storePath,
-      CarbonTableIdentifier carbonTableIdentifier, String segmentId) {
-    CarbonTablePath carbonTablePath =
-        CarbonStorePath.getCarbonTablePath(storePath, carbonTableIdentifier);
-    return carbonTablePath.getCarbonDataDirectoryPath("0", segmentId);
   }
 
   /**

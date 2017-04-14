@@ -32,8 +32,8 @@ import org.apache.carbondata.core.scan.expression.Expression
 import org.apache.carbondata.core.scan.expression.logical.AndExpression
 import org.apache.carbondata.hadoop.CarbonProjection
 import org.apache.carbondata.hadoop.util.SchemaReader
+import org.apache.carbondata.processing.merger.TableMeta
 import org.apache.carbondata.spark.CarbonFilters
-import org.apache.carbondata.spark.merger.TableMeta
 import org.apache.carbondata.spark.rdd.CarbonScanRDD
 import org.apache.carbondata.spark.util.CarbonSparkUtil
 
@@ -43,7 +43,7 @@ case class CarbonDatasourceHadoopRelation(
     parameters: Map[String, String],
     tableSchema: Option[StructType],
     isSubquery: ArrayBuffer[Boolean] = new ArrayBuffer[Boolean]())
-  extends BaseRelation with InsertableRelation {
+  extends BaseRelation {
 
   lazy val absIdentifier = AbsoluteTableIdentifier.fromTablePath(paths.head)
   lazy val carbonTable = SchemaReader.readCarbonTableFromStore(absIdentifier)
@@ -74,15 +74,9 @@ case class CarbonDatasourceHadoopRelation(
   }
   override def unhandledFilters(filters: Array[Filter]): Array[Filter] = new Array[Filter](0)
 
-  override def insert(data: DataFrame, overwrite: Boolean): Unit = {
-    if (carbonRelation.output.size > CarbonCommonConstants.DEFAULT_MAX_NUMBER_OF_COLUMNS) {
-      sys.error("Maximum supported column by carbon is:" +
-          CarbonCommonConstants.DEFAULT_MAX_NUMBER_OF_COLUMNS)
-    }
-    if(data.logicalPlan.output.size >= carbonRelation.output.size) {
-      LoadTableByInsert(this, data.logicalPlan).run(sparkSession)
-    } else {
-      sys.error("Cannot insert into target table because column number are different")
-    }
+  override def toString: String = {
+    "CarbonDatasourceHadoopRelation [ " + "Database name :" + carbonTable.getDatabaseName +
+    ", " + "Table name :" + carbonTable.getFactTableName + ", Schema :" + tableSchema + " ]"
   }
+
 }

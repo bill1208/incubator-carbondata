@@ -16,7 +16,7 @@
  */
 package org.apache.spark.sql.execution.command
 
-import org.apache.spark.sql.{CarbonEnv, ShowLoadsCommand, SparkSession}
+import org.apache.spark.sql.{CarbonDatasourceHadoopRelation, CarbonEnv, InsertIntoCarbonTable, ShowLoadsCommand, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -54,6 +54,9 @@ class DDLStrategy(sparkSession: SparkSession) extends SparkStrategy {
             identifier.table.toLowerCase)) :: Nil
       case ShowLoadsCommand(databaseName, table, limit) =>
         ExecutedCommandExec(ShowLoads(databaseName, table.toLowerCase, limit, plan.output)) :: Nil
+      case InsertIntoCarbonTable(relation: CarbonDatasourceHadoopRelation,
+        _, child: LogicalPlan, _, _) =>
+        ExecutedCommandExec(LoadTableByInsert(relation, child)) :: Nil
       case createDb@CreateDatabaseCommand(dbName, ifNotExists, _, _, _) =>
         CarbonEnv.get.carbonMetastore.createDatabaseDirectory(dbName)
         ExecutedCommandExec(createDb) :: Nil
@@ -72,7 +75,8 @@ class DDLStrategy(sparkSession: SparkSession) extends SparkStrategy {
               "Unsupported alter operation on carbon table")
           }
         } else {
-          throw new MalformedCarbonCommandException("Unsupported alter operation on hive table")
+          throw new MalformedCarbonCommandException(
+            "Operation not allowed : " + altertablemodel.alterSql)
         }
       case dataTypeChange@AlterTableDataTypeChange(alterTableChangeDataTypeModel) =>
         val isCarbonTable = CarbonEnv.get.carbonMetastore

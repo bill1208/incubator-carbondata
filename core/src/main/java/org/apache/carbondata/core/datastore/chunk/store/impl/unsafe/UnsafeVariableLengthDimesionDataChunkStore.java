@@ -21,6 +21,8 @@ import java.nio.ByteBuffer;
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.memory.CarbonUnsafe;
+import org.apache.carbondata.core.scan.result.vector.CarbonColumnVector;
+import org.apache.carbondata.core.util.ByteUtil;
 
 /**
  * Below class is responsible to store variable length dimension data chunk in
@@ -118,7 +120,7 @@ public class UnsafeVariableLengthDimesionDataChunkStore
   /**
    * Below method will be used to get the row based on row id passed
    *
-   * @param index
+   * @param rowId
    * @return row
    */
   @Override public byte[] getRow(int rowId) {
@@ -154,6 +156,16 @@ public class UnsafeVariableLengthDimesionDataChunkStore
         dataPageMemoryBlock.getBaseOffset() + currentDataOffset, data,
         CarbonUnsafe.BYTE_ARRAY_OFFSET, length);
     return data;
+  }
+
+  @Override public void fillRow(int rowId, CarbonColumnVector vector, int vectorRow) {
+    byte[] value = getRow(rowId);
+    if (ByteUtil.UnsafeComparer.INSTANCE
+        .equals(CarbonCommonConstants.MEMBER_DEFAULT_VAL_ARRAY, value)) {
+      vector.putNull(vectorRow);
+    } else {
+      vector.putBytes(vectorRow, value);
+    }
   }
 
   /**

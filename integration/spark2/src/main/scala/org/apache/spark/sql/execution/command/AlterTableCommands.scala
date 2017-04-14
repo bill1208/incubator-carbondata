@@ -26,7 +26,6 @@ import org.apache.spark.sql.hive.{CarbonRelation, HiveExternalCatalog}
 import org.apache.spark.util.AlterTableUtil
 
 import org.apache.carbondata.common.logging.LogServiceFactory
-import org.apache.carbondata.core.cache.dictionary.ManageDictionary
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.locks.{CarbonLockFactory, LockUsage}
@@ -34,10 +33,12 @@ import org.apache.carbondata.core.metadata.{CarbonMetadata, CarbonTableIdentifie
 import org.apache.carbondata.core.metadata.converter.ThriftWrapperSchemaConverterImpl
 import org.apache.carbondata.core.metadata.encoder.Encoding
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn
+import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
 import org.apache.carbondata.core.util.CarbonUtil
 import org.apache.carbondata.core.util.path.CarbonStorePath
 import org.apache.carbondata.format.{ColumnSchema, SchemaEvolutionEntry, TableInfo}
 import org.apache.carbondata.spark.exception.MalformedCarbonCommandException
+import org.apache.carbondata.spark.rdd.AlterTableDropColumnRDD
 import org.apache.carbondata.spark.util.{CarbonScalaUtil, DataTypeConverterUtil}
 
 private[sql] case class AlterTableAddColumns(
@@ -50,11 +51,14 @@ private[sql] case class AlterTableAddColumns(
     val dbName = alterTableAddColumnsModel.databaseName
       .getOrElse(sparkSession.catalog.currentDatabase)
     LOGGER.audit(s"Alter table add columns request has been received for $dbName.$tableName")
-    val carbonLock = AlterTableUtil
-      .validateTableAndAcquireLock(dbName, tableName, LOGGER)(sparkSession)
+    val locksToBeAcquired = List(LockUsage.METADATA_LOCK, LockUsage.COMPACTION_LOCK)
+    val locks = AlterTableUtil
+      .validateTableAndAcquireLock(dbName, tableName, locksToBeAcquired, LOGGER)(sparkSession)
+    // get the latest carbon table and check for column existence
+    val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
+    var newCols = Seq[org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema]()
+    val lastUpdatedTime = carbonTable.getTableLastUpdatedTime
     try {
-      // get the latest carbon table and check for column existence
-      val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
       // read the latest schema file
       val carbonTablePath = CarbonStorePath.getCarbonTablePath(carbonTable.getStorePath,
         carbonTable.getCarbonTableIdentifier)
@@ -67,19 +71,17 @@ private[sql] case class AlterTableAddColumns(
           dbName,
           tableName,
           carbonTable.getStorePath)
-      val newCols = new AlterTableProcessor(alterTableAddColumnsModel,
+      newCols = new AlterTableProcessor(alterTableAddColumnsModel,
         dbName,
         wrapperTableInfo,
         carbonTablePath,
         carbonTable.getCarbonTableIdentifier,
-        carbonTable.getStorePath).process
+        carbonTable.getStorePath, sparkSession.sparkContext).process
       val schemaEvolutionEntry = new org.apache.carbondata.core.metadata.schema.SchemaEvolutionEntry
       schemaEvolutionEntry.setTimeStamp(System.currentTimeMillis)
       schemaEvolutionEntry.setAdded(newCols.toList.asJava)
       val thriftTable = schemaConverter
         .fromWrapperToExternalTableInfo(wrapperTableInfo, dbName, tableName)
-      thriftTable.getFact_table.getSchema_evolution.getSchema_evolution_history.get(0)
-        .setTime_stamp(System.currentTimeMillis)
       AlterTableUtil
         .updateSchemaInfo(carbonTable,
           schemaConverter.fromWrapperToExternalSchemaEvolutionEntry(schemaEvolutionEntry),
@@ -88,18 +90,20 @@ private[sql] case class AlterTableAddColumns(
       LOGGER.info(s"Alter table for add columns is successful for table $dbName.$tableName")
       LOGGER.audit(s"Alter table for add columns is successful for table $dbName.$tableName")
     } catch {
-      case e: Exception =>
-        LOGGER.error("Alter table add columns failed : " + e.getMessage)
-        throw e
+      case e: Exception => LOGGER
+        .error("Alter table add columns failed :" + e.getMessage)
+        if (!newCols.isEmpty) {
+          LOGGER.info("Cleaning up the dictionary files as alter table add operation failed")
+          new AlterTableDropColumnRDD(sparkSession.sparkContext,
+            newCols,
+            carbonTable.getCarbonTableIdentifier,
+            carbonTable.getStorePath).collect()
+        }
+        AlterTableUtil.revertAddColumnChanges(dbName, tableName, lastUpdatedTime)(sparkSession)
+        sys.error("Alter table add column operation failed. Please check the logs")
     } finally {
       // release lock after command execution completion
-      if (carbonLock != null) {
-        if (carbonLock.unlock()) {
-          LOGGER.info("Alter table add columns lock released successfully")
-        } else {
-          LOGGER.error("Unable to release lock during alter table add columns operation")
-        }
-      }
+      AlterTableUtil.releaseLocks(locks, LOGGER)
     }
     Seq.empty
   }
@@ -138,15 +142,16 @@ private[sql] case class AlterTableRenameTable(alterTableRenameModel: AlterTableR
                    s"Table $oldDatabaseName.$oldTableName does not exist")
       sys.error(s"Table $oldDatabaseName.$oldTableName does not exist")
     }
+    val locksToBeAcquired = List(LockUsage.METADATA_LOCK,
+      LockUsage.COMPACTION_LOCK,
+      LockUsage.DELETE_SEGMENT_LOCK,
+      LockUsage.CLEAN_FILES_LOCK,
+      LockUsage.DROP_TABLE_LOCK)
+    val locks = AlterTableUtil
+      .validateTableAndAcquireLock(oldDatabaseName, oldTableName, locksToBeAcquired, LOGGER)(
+        sparkSession)
     val carbonTable = relation.tableMeta.carbonTable
-    val carbonLock = CarbonLockFactory
-      .getCarbonLockObj(carbonTable.getAbsoluteTableIdentifier.getCarbonTableIdentifier,
-        LockUsage.METADATA_LOCK)
-    if (carbonLock.lockWithRetries()) {
-      LOGGER.info("Successfully able to get the table metadata file lock")
-    } else {
-      sys.error("Table is locked for updation. Please try after some time")
-    }
+    val lastUpdatedTime = carbonTable.getTableLastUpdatedTime
     try {
       // get the latest carbon table and check for column existence
       val carbonTablePath = CarbonStorePath.getCarbonTablePath(carbonTable.getStorePath,
@@ -156,6 +161,7 @@ private[sql] case class AlterTableRenameTable(alterTableRenameModel: AlterTableR
         .readSchemaFile(tableMetadataFile)
       val schemaEvolutionEntry = new SchemaEvolutionEntry(System.currentTimeMillis)
       schemaEvolutionEntry.setTableName(newTableName)
+      schemaEvolutionEntry.setTime_stamp(System.currentTimeMillis())
       renameBadRecords(oldTableName, newTableName, oldDatabaseName)
       val fileType = FileFactory.getFileType(tableMetadataFile)
       if (FileFactory.isFileExist(tableMetadataFile, fileType)) {
@@ -163,8 +169,8 @@ private[sql] case class AlterTableRenameTable(alterTableRenameModel: AlterTableR
           .renameForce(carbonTablePath.getParent.toString + CarbonCommonConstants.FILE_SEPARATOR +
                        newTableName)
         if (!rename) {
-          sys.error(s"Folder rename failed for table $oldDatabaseName.$oldTableName")
           renameBadRecords(newTableName, oldTableName, oldDatabaseName)
+          sys.error(s"Folder rename failed for table $oldDatabaseName.$oldTableName")
         }
       }
       val newTableIdentifier = new CarbonTableIdentifier(oldDatabaseName,
@@ -186,17 +192,23 @@ private[sql] case class AlterTableRenameTable(alterTableRenameModel: AlterTableR
       LOGGER.audit(s"Table $oldTableName has been successfully renamed to $newTableName")
       LOGGER.info(s"Table $oldTableName has been successfully renamed to $newTableName")
     } catch {
-      case e: Exception => LOGGER.error("Rename table failed: " + e.getMessage)
-        throw e
+      case e: Exception => LOGGER
+        .error("Rename table failed: " + e.getMessage)
+        AlterTableUtil.revertRenameTableChanges(oldTableIdentifier, newTableName, lastUpdatedTime)(
+            sparkSession)
+        renameBadRecords(newTableName, oldTableName, oldDatabaseName)
+        sys.error("Alter table rename table operation failed. Please check the logs")
     } finally {
       // release lock after command execution completion
-      if (carbonLock != null) {
-        if (carbonLock.unlock()) {
-          LOGGER.info("Lock released successfully")
-        } else {
-          LOGGER.error("Unable to release lock during rename table")
-        }
-      }
+      AlterTableUtil.releaseLocks(locks, LOGGER)
+      // case specific to rename table as after table rename old table path will not be found
+      AlterTableUtil
+        .releaseLocksManually(locks,
+          locksToBeAcquired,
+          oldDatabaseName,
+          newTableName,
+          carbonTable.getStorePath,
+          LOGGER)
     }
     Seq.empty
   }
@@ -230,16 +242,19 @@ private[sql] case class AlterTableDropColumns(
     val dbName = alterTableDropColumnModel.databaseName
       .getOrElse(sparkSession.catalog.currentDatabase)
     LOGGER.audit(s"Alter table drop columns request has been received for $dbName.$tableName")
-    val carbonLock = AlterTableUtil
-      .validateTableAndAcquireLock(dbName, tableName, LOGGER)(sparkSession)
+    val locksToBeAcquired = List(LockUsage.METADATA_LOCK, LockUsage.COMPACTION_LOCK)
+    val locks = AlterTableUtil
+      .validateTableAndAcquireLock(dbName, tableName, locksToBeAcquired, LOGGER)(sparkSession)
+    // get the latest carbon table and check for column existence
+    val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
+    val lastUpdatedTime = carbonTable.getTableLastUpdatedTime
     try {
-      // get the latest carbon table and check for column existence
-      val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
       // check each column existence in the table
       val tableColumns = carbonTable.getCreateOrderColumn(tableName).asScala
-      var dictionaryColumns = ListBuffer[CarbonColumn]()
+      var dictionaryColumns = Seq[org.apache.carbondata.core.metadata.schema.table.column
+      .ColumnSchema]()
       var keyColumnCountToBeDeleted = 0
-      // TODO: if deleted column list includes shared dictionary/bucketted column throw an error
+      // TODO: if deleted column list includes bucketted column throw an error
       alterTableDropColumnModel.columns.foreach { column =>
         var columnExist = false
         tableColumns.foreach { tableColumn =>
@@ -248,7 +263,7 @@ private[sql] case class AlterTableDropColumns(
             if (tableColumn.isDimesion) {
               keyColumnCountToBeDeleted += 1
               if (tableColumn.hasEncoding(Encoding.DICTIONARY)) {
-                dictionaryColumns += tableColumn
+                dictionaryColumns ++= Seq(tableColumn.getColumnSchema)
               }
             }
             columnExist = true
@@ -260,12 +275,8 @@ private[sql] case class AlterTableDropColumns(
       }
       // take the total key column count. key column to be deleted should not
       // be >= key columns in schema
-      var totalKeyColumnInSchema = 0
-      tableColumns.foreach { tableColumn =>
-        // column should not be already deleted and should exist in the table
-        if (!tableColumn.isInvisible && tableColumn.isDimesion) {
-          totalKeyColumnInSchema += 1
-        }
+      val totalKeyColumnInSchema = tableColumns.count {
+        tableColumn => !tableColumn.isInvisible && tableColumn.isDimesion
       }
       if (keyColumnCountToBeDeleted >= totalKeyColumnInSchema) {
         sys.error(s"Alter drop operation failed. AtLeast one key column should exist after drop.")
@@ -288,8 +299,6 @@ private[sql] case class AlterTableDropColumns(
         }
       }
       // add deleted columns to schema evolution history and update the schema
-      tableInfo.getFact_table.getSchema_evolution.getSchema_evolution_history.get(0)
-        .setTime_stamp(System.currentTimeMillis)
       val schemaEvolutionEntry = new SchemaEvolutionEntry(System.currentTimeMillis)
       schemaEvolutionEntry.setRemoved(deletedColumnSchema.toList.asJava)
       AlterTableUtil
@@ -299,22 +308,20 @@ private[sql] case class AlterTableDropColumns(
           sparkSession.sharedState.externalCatalog.asInstanceOf[HiveExternalCatalog])
       // TODO: 1. add check for deletion of index tables
       // delete dictionary files for dictionary column and clear dictionary cache from memory
-      ManageDictionary.deleteDictionaryFileAndCache(dictionaryColumns.toList.asJava, carbonTable)
+      new AlterTableDropColumnRDD(sparkSession.sparkContext,
+        dictionaryColumns,
+        carbonTable.getCarbonTableIdentifier,
+        carbonTable.getStorePath).collect()
       LOGGER.info(s"Alter table for drop columns is successful for table $dbName.$tableName")
       LOGGER.audit(s"Alter table for drop columns is successful for table $dbName.$tableName")
     } catch {
-      case e: Exception =>
-        LOGGER.error("Alter table drop columns failed : " + e.getMessage)
-        throw e
+      case e: Exception => LOGGER
+        .error("Alter table drop columns failed : " + e.getMessage)
+        AlterTableUtil.revertDropColumnChanges(dbName, tableName, lastUpdatedTime)(sparkSession)
+        sys.error("Alter table drop column operation failed. Please check the logs")
     } finally {
       // release lock after command execution completion
-      if (carbonLock != null) {
-        if (carbonLock.unlock()) {
-          LOGGER.info("Alter table drop columns lock released successfully")
-        } else {
-          LOGGER.error("Unable to release lock during alter table drop columns operation")
-        }
-      }
+      AlterTableUtil.releaseLocks(locks, LOGGER)
     }
     Seq.empty
   }
@@ -330,13 +337,14 @@ private[sql] case class AlterTableDataTypeChange(
     val dbName = alterTableDataTypeChangeModel.databaseName
       .getOrElse(sparkSession.catalog.currentDatabase)
     LOGGER.audit(s"Alter table change data type request has been received for $dbName.$tableName")
-    val carbonLock = AlterTableUtil
-      .validateTableAndAcquireLock(dbName, tableName, LOGGER)(sparkSession)
+    val locksToBeAcquired = List(LockUsage.METADATA_LOCK, LockUsage.COMPACTION_LOCK)
+    val locks = AlterTableUtil
+      .validateTableAndAcquireLock(dbName, tableName, locksToBeAcquired, LOGGER)(sparkSession)
+    // get the latest carbon table and check for column existence
+    val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
+    val lastUpdatedTime = carbonTable.getTableLastUpdatedTime
     try {
-      // get the latest carbon table and check for column existence
-      val carbonTable = CarbonMetadata.getInstance.getCarbonTable(dbName + "_" + tableName)
       val columnName = alterTableDataTypeChangeModel.columnName
-      var carbonColumnToBeModified: CarbonColumn = null
       val carbonColumns = carbonTable.getCreateOrderColumn(tableName).asScala.filter(!_.isInvisible)
 
       if (!carbonColumns.exists(_.getColName.equalsIgnoreCase(columnName))) {
@@ -386,18 +394,13 @@ private[sql] case class AlterTableDataTypeChange(
       LOGGER.info(s"Alter table for data type change is successful for table $dbName.$tableName")
       LOGGER.audit(s"Alter table for data type change is successful for table $dbName.$tableName")
     } catch {
-      case e: Exception =>
-        LOGGER.error("Alter table change datatype failed : " + e.getMessage)
-        throw e
+      case e: Exception => LOGGER
+        .error("Alter table change datatype failed : " + e.getMessage)
+        AlterTableUtil.revertDataTypeChanges(dbName, tableName, lastUpdatedTime)(sparkSession)
+        sys.error("Alter table data type change operation failed. Please check the logs")
     } finally {
       // release lock after command execution completion
-      if (carbonLock != null) {
-        if (carbonLock.unlock()) {
-          LOGGER.info("Alter table change data type lock released successfully")
-        } else {
-          LOGGER.error("Unable to release lock during alter table change data type operation")
-        }
-      }
+      AlterTableUtil.releaseLocks(locks, LOGGER)
     }
     Seq.empty
   }

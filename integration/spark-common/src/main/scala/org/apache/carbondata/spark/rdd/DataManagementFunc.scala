@@ -33,10 +33,11 @@ import org.apache.carbondata.core.metadata.{CarbonMetadata, CarbonTableIdentifie
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.mutate.CarbonUpdateUtil
 import org.apache.carbondata.core.statusmanager.{LoadMetadataDetails, SegmentStatusManager}
+import org.apache.carbondata.processing.merger.{CarbonDataMergerUtil, CompactionType}
 import org.apache.carbondata.processing.model.{CarbonDataLoadSchema, CarbonLoadModel}
 import org.apache.carbondata.spark._
+import org.apache.carbondata.spark.compaction.CompactionCallable
 import org.apache.carbondata.spark.load._
-import org.apache.carbondata.spark.merger.{CarbonDataMergerUtil, CompactionCallable, CompactionType}
 import org.apache.carbondata.spark.util.{CommonUtil, LoadMetadataUtil}
 
 /**
@@ -150,7 +151,6 @@ object DataManagementFunc {
       compactionModel: CompactionModel,
       executor: ExecutorService,
       sqlContext: SQLContext,
-      kettleHomePath: String,
       storeLocation: String): Unit = {
     val sortedSegments: util.List[LoadMetadataDetails] = new util.ArrayList[LoadMetadataDetails](
       carbonLoadModel.getLoadMetadataDetails
@@ -181,7 +181,6 @@ object DataManagementFunc {
         storePath,
         sqlContext,
         compactionModel,
-        kettleHomePath,
         carbonLoadModel,
         storeLocation
       )
@@ -239,7 +238,6 @@ object DataManagementFunc {
       storePath: String,
       sqlContext: SQLContext,
       compactionModel: CompactionModel,
-      kettleHomePath: String,
       carbonLoadModel: CarbonLoadModel,
       storeLocation: String): Unit = {
 
@@ -252,7 +250,6 @@ object DataManagementFunc {
       carbonLoadModel,
       storeLocation,
       compactionModel.carbonTable,
-      kettleHomePath,
       compactionModel.tableCreationTime,
       loadsToMerge,
       sqlContext,

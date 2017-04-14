@@ -33,11 +33,15 @@ import java.util.Set;
 import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
+import org.apache.carbondata.core.constants.IgnoreDictionary;
+import org.apache.carbondata.core.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.datastore.filesystem.CarbonFile;
 import org.apache.carbondata.core.datastore.filesystem.CarbonFileFilter;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
 import org.apache.carbondata.core.datastore.impl.FileFactory.FileType;
+import org.apache.carbondata.core.keygenerator.KeyGenException;
 import org.apache.carbondata.core.metadata.CarbonMetadata;
+import org.apache.carbondata.core.metadata.CarbonTableIdentifier;
 import org.apache.carbondata.core.metadata.datatype.DataType;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
@@ -53,14 +57,9 @@ import org.apache.carbondata.processing.datatypes.PrimitiveDataType;
 import org.apache.carbondata.processing.datatypes.StructDataType;
 import org.apache.carbondata.processing.model.CarbonDataLoadSchema;
 import org.apache.carbondata.processing.newflow.DataField;
+import org.apache.carbondata.processing.newflow.row.CarbonRow;
 
 import org.apache.commons.lang3.ArrayUtils;
-import org.pentaho.di.core.CheckResult;
-import org.pentaho.di.core.CheckResultInterface;
-import org.pentaho.di.core.Const;
-import org.pentaho.di.core.row.RowMetaInterface;
-import org.pentaho.di.i18n.BaseMessages;
-import org.pentaho.di.trans.step.StepMeta;
 
 public final class CarbonDataProcessorUtil {
   private static final LogService LOGGER =
@@ -149,9 +148,7 @@ public final class CarbonDataProcessorUtil {
 
     String badRecordsInProgressFileName = null;
     String changedFileName = null;
-    // CHECKSTYLE:OFF
     for (CarbonFile badFiles : listFiles) {
-      // CHECKSTYLE:ON
       badRecordsInProgressFileName = badFiles.getName();
 
       changedFileName = badLogStoreLocation + File.separator + badRecordsInProgressFileName
@@ -164,51 +161,6 @@ public final class CarbonDataProcessorUtil {
           LOGGER.error("Unable to delete File : " + badFiles.getName());
         }
       }
-    } // CHECKSTYLE:ON
-  }
-
-  public static void checkResult(List<CheckResultInterface> remarks, StepMeta stepMeta,
-      String[] input) {
-    CheckResult cr;
-
-    // See if we have input streams leading to this step!
-    if (input.length > 0) {
-      cr = new CheckResult(CheckResult.TYPE_RESULT_OK, "Step is receiving info from other steps.",
-          stepMeta);
-      remarks.add(cr);
-    } else {
-      cr = new CheckResult(CheckResult.TYPE_RESULT_ERROR, "No input received from other steps!",
-          stepMeta);
-      remarks.add(cr);
-    }
-  }
-
-  public static void check(Class<?> pkg, List<CheckResultInterface> remarks, StepMeta stepMeta,
-      RowMetaInterface prev, String[] input) {
-    CheckResult cr;
-
-    // See if we have input streams leading to this step!
-    if (input.length > 0) {
-      cr = new CheckResult(CheckResult.TYPE_RESULT_OK,
-          BaseMessages.getString(pkg, "CarbonStep.Check.StepIsReceivingInfoFromOtherSteps"),
-          stepMeta);
-      remarks.add(cr);
-    } else {
-      cr = new CheckResult(CheckResult.TYPE_RESULT_ERROR,
-          BaseMessages.getString(pkg, "CarbonStep.Check.NoInputReceivedFromOtherSteps"), stepMeta);
-      remarks.add(cr);
-    }
-
-    // also check that each expected key fields are acually coming
-    if (prev != null && prev.size() > 0) {
-      cr = new CheckResult(CheckResultInterface.TYPE_RESULT_OK,
-          BaseMessages.getString(pkg, "CarbonStep.Check.AllFieldsFoundInInput"), stepMeta);
-      remarks.add(cr);
-    } else {
-      String errorMessage =
-          BaseMessages.getString(pkg, "CarbonStep.Check.CouldNotReadFromPreviousSteps") + Const.CR;
-      cr = new CheckResult(CheckResultInterface.TYPE_RESULT_ERROR, errorMessage, stepMeta);
-      remarks.add(cr);
     }
   }
 
@@ -482,6 +434,76 @@ public final class CarbonDataProcessorUtil {
       }
     }
     return dateformatsHashMap;
+  }
+
+  /**
+   * This method will convert surrogate key to MD key and fill the row in format
+   * required by the writer for further processing
+   *
+   * @param row
+   * @param segmentProperties
+   * @param measureCount
+   * @param noDictionaryCount
+   * @param complexDimensionCount
+   * @return
+   * @throws KeyGenException
+   */
+  public static Object[] convertToMDKeyAndFillRow(CarbonRow row,
+      SegmentProperties segmentProperties, int measureCount, int noDictionaryCount,
+      int complexDimensionCount) throws KeyGenException {
+    Object[] outputRow = null;
+    // adding one for the high cardinality dims byte array.
+    if (noDictionaryCount > 0 || complexDimensionCount > 0) {
+      outputRow = new Object[measureCount + 1 + 1];
+    } else {
+      outputRow = new Object[measureCount + 1];
+    }
+    int l = 0;
+    int index = 0;
+    Object[] measures = row.getObjectArray(IgnoreDictionary.MEASURES_INDEX_IN_ROW.getIndex());
+    for (int i = 0; i < measureCount; i++) {
+      outputRow[l++] = measures[index++];
+    }
+    outputRow[l] = row.getObject(IgnoreDictionary.BYTE_ARRAY_INDEX_IN_ROW.getIndex());
+    int[] highCardExcludedRows = new int[segmentProperties.getDimColumnsCardinality().length];
+    int[] dimsArray = row.getIntArray(IgnoreDictionary.DIMENSION_INDEX_IN_ROW.getIndex());
+    for (int i = 0; i < highCardExcludedRows.length; i++) {
+      highCardExcludedRows[i] = dimsArray[i];
+    }
+    outputRow[outputRow.length - 1] =
+        segmentProperties.getDimensionKeyGenerator().generateKey(highCardExcludedRows);
+    return outputRow;
+  }
+
+  /**
+   * This method will get the store location for the given path, segment id and partition id
+   *
+   * @return data directory path
+   */
+  public static String checkAndCreateCarbonStoreLocation(String factStoreLocation,
+      String databaseName, String tableName, String partitionId, String segmentId) {
+    CarbonTable carbonTable = CarbonMetadata.getInstance()
+        .getCarbonTable(databaseName + CarbonCommonConstants.UNDERSCORE + tableName);
+    CarbonTableIdentifier carbonTableIdentifier = carbonTable.getCarbonTableIdentifier();
+    CarbonTablePath carbonTablePath =
+        CarbonStorePath.getCarbonTablePath(factStoreLocation, carbonTableIdentifier);
+    String carbonDataDirectoryPath =
+        carbonTablePath.getCarbonDataDirectoryPath(partitionId, segmentId);
+    CarbonUtil.checkAndCreateFolder(carbonDataDirectoryPath);
+    return carbonDataDirectoryPath;
+  }
+
+  /**
+   * initialise aggregation type for measures for their storage format
+   */
+  public static char[] initAggType(CarbonTable carbonTable, String tableName, int measureCount) {
+    char[] aggType = new char[measureCount];
+    Arrays.fill(aggType, 'n');
+    List<CarbonMeasure> measures = carbonTable.getMeasureByTableName(tableName);
+    for (int i = 0; i < measureCount; i++) {
+      aggType[i] = DataTypeUtil.getAggType(measures.get(i).getDataType());
+    }
+    return aggType;
   }
 
 }

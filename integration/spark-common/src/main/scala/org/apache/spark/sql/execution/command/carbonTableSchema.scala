@@ -23,6 +23,7 @@ import java.util.UUID
 import scala.collection.JavaConverters._
 import scala.collection.mutable.Map
 
+import org.apache.spark.SparkContext
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.catalyst.TableIdentifier
 
@@ -38,10 +39,11 @@ import org.apache.carbondata.core.service.CarbonCommonFactory
 import org.apache.carbondata.core.statusmanager.{LoadMetadataDetails, SegmentUpdateStatusManager}
 import org.apache.carbondata.core.util.DataTypeUtil
 import org.apache.carbondata.core.util.path.CarbonTablePath
+import org.apache.carbondata.processing.merger.CompactionType
 import org.apache.carbondata.processing.model.CarbonLoadModel
 import org.apache.carbondata.spark.CarbonSparkFactory
 import org.apache.carbondata.spark.load.FailureCauses
-import org.apache.carbondata.spark.merger.CompactionType
+import org.apache.carbondata.spark.rdd.AlterTableAddColumnRDD
 import org.apache.carbondata.spark.util.{DataTypeConverterUtil, GlobalDictionaryUtil}
 
 case class TableModel(
@@ -86,7 +88,6 @@ case class CarbonMergerMapping(storeLocation: String,
     hdfsStoreLocation: String,
     metadataFilePath: String,
     var mergedLoadName: String,
-    kettleHomePath: String,
     tableCreationTime: Long,
     databaseName: String,
     factTableName: String,
@@ -105,7 +106,7 @@ case class AlterTableModel(dbName: Option[String],
                            segmentUpdateStatusManager: Option[SegmentUpdateStatusManager],
                            compactionType: String,
                            factTimeStamp: Option[Long],
-                           alterSql: String)
+                           var alterSql: String)
 
 case class UpdateTableModel(isUpdate: Boolean,
                             updatedTimeStamp: Long,
@@ -121,7 +122,6 @@ case class CompactionCallableModel(storePath: String,
     carbonLoadModel: CarbonLoadModel,
     storeLocation: String,
     carbonTable: CarbonTable,
-    kettleHomePath: String,
     cubeCreationTime: Long,
     loadsToMerge: util.List[LoadMetadataDetails],
     sqlContext: SQLContext,
@@ -158,7 +158,7 @@ class AlterTableProcessor(
     tableInfo: TableInfo,
     carbonTablePath: CarbonTablePath,
     tableIdentifier: CarbonTableIdentifier,
-    storePath: String) {
+    storePath: String, sc: SparkContext) {
 
   val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
 
@@ -229,7 +229,6 @@ class AlterTableProcessor(
           tablePropertiesMap.put(x._1, x._2)
         }
     }
-
     // This part will create dictionary file for all newly added dictionary columns
     // if valid default value is provided,
     // then that value will be included while creating dictionary file
@@ -240,7 +239,7 @@ class AlterTableProcessor(
         if (elem._1.toLowerCase.startsWith(defaultValueString)) {
           if (col.getColumnName.equalsIgnoreCase(elem._1.substring(defaultValueString.length))) {
             rawData = elem._2
-            val data = DataTypeUtil.convertDataToBytesBasedOnDataType(elem._2, col.getDataType)
+            val data = DataTypeUtil.convertDataToBytesBasedOnDataType(elem._2, col)
             if (null != data) {
               col.setDefaultValue(data)
             } else {
@@ -253,17 +252,13 @@ class AlterTableProcessor(
           }
         }
       }
-      if (col.getEncodingList.contains(Encoding.DICTIONARY) &&
-          !col.getEncodingList.contains(Encoding.DIRECT_DICTIONARY)) {
-        GlobalDictionaryUtil
-          .loadDefaultDictionaryValueForNewColumn(carbonTablePath,
-            col,
-            tableIdentifier,
-            storePath,
-            rawData)
-      }
     }
-
+    // generate dictionary files for the newly added columns
+    new AlterTableAddColumnRDD(sc,
+      newCols,
+      alterTableModel,
+      tableIdentifier,
+      storePath).collect()
     tableSchema.setListOfColumns(allColumns.asJava)
     tableInfo.setLastUpdatedTime(System.currentTimeMillis())
     tableInfo.setFactTable(tableSchema)

@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.spark.carbondata.restructure
 
 import java.io.File
@@ -102,6 +119,14 @@ class AlterTableValidationTestCase extends QueryTest with BeforeAndAfterAll {
     checkExistence(sql("desc restructure"), true, "longfldbigint")
     checkExistence(sql("desc restructure"), true, "dblflddouble")
     checkExistence(sql("desc restructure"), true, "dcmldecimal(5,4)")
+  }
+
+  test(
+    "test add decimal without scale and precision, default precision and scale (10,0) should be " +
+    "used")
+  {
+    sql("alter table restructure add columns(dcmldefault decimal)")
+    checkExistence(sql("desc restructure"), true, "dcmldefaultdecimal(10,0)")
   }
 
   test("test adding existing measure as dimension") {
@@ -373,11 +398,19 @@ class AlterTableValidationTestCase extends QueryTest with BeforeAndAfterAll {
     sql("drop database testdb")
   }
 
+  test("test to check if the lock file is successfully deleted") {
+      sql("create table lock_check(id int, name string) stored by 'carbondata'")
+    sql("alter table lock_check rename to lock_rename")
+    assert(!new File(s"${ CarbonCommonConstants.STORE_LOCATION } + /default/lock_rename/meta.lock")
+      .exists())
+  }
+
   override def afterAll {
     sql("DROP TABLE IF EXISTS restructure")
     sql("DROP TABLE IF EXISTS restructure_new")
     sql("DROP TABLE IF EXISTS restructure_test")
     sql("DROP TABLE IF EXISTS restructure_bad")
     sql("DROP TABLE IF EXISTS restructure_badnew")
+    sql("DROP TABLE IF EXISTS lock_rename")
   }
 }

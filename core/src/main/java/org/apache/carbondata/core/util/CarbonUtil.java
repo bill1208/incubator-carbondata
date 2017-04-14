@@ -23,12 +23,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.Charset;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
@@ -83,7 +81,6 @@ import org.apache.thrift.TException;
 import org.apache.thrift.protocol.TCompactProtocol;
 import org.apache.thrift.protocol.TProtocol;
 import org.apache.thrift.transport.TIOStreamTransport;
-import org.pentaho.di.core.exception.KettleException;
 
 public final class CarbonUtil {
 
@@ -631,42 +628,6 @@ public final class CarbonUtil {
     return cardinality;
   }
 
-  public static void writeLevelCardinalityFile(String loadFolderLoc, String tableName,
-      int[] dimCardinality) throws KettleException {
-    String levelCardinalityFilePath =
-        loadFolderLoc + File.separator + CarbonCommonConstants.LEVEL_METADATA_FILE + tableName
-            + CarbonCommonConstants.CARBON_METADATA_EXTENSION;
-    FileOutputStream fileOutputStream = null;
-    FileChannel channel = null;
-    try {
-      int dimCardinalityArrLength = dimCardinality.length;
-
-      // first four bytes for writing the length of array, remaining for array data
-      ByteBuffer buffer = ByteBuffer.allocate(CarbonCommonConstants.INT_SIZE_IN_BYTE
-          + dimCardinalityArrLength * CarbonCommonConstants.INT_SIZE_IN_BYTE);
-
-      fileOutputStream = new FileOutputStream(levelCardinalityFilePath);
-      channel = fileOutputStream.getChannel();
-      buffer.putInt(dimCardinalityArrLength);
-
-      for (int i = 0; i < dimCardinalityArrLength; i++) {
-        buffer.putInt(dimCardinality[i]);
-      }
-
-      buffer.flip();
-      channel.write(buffer);
-      buffer.clear();
-
-      LOGGER.info("Level cardinality file written to : " + levelCardinalityFilePath);
-    } catch (IOException e) {
-      LOGGER.error("Error while writing level cardinality file : " + levelCardinalityFilePath + e
-          .getMessage());
-      throw new KettleException("Not able to write level cardinality file", e);
-    } finally {
-      closeStreams(channel, fileOutputStream);
-    }
-  }
-
   /**
    * From beeline if a delimeter is passed as \001, in code we get it as
    * escaped string as \\001. So this method will unescape the slash again and
@@ -858,7 +819,7 @@ public final class CarbonUtil {
     char[] type = new char[encodeMetaList.size()];
     byte[] dataTypeSelected = new byte[encodeMetaList.size()];
 
-    /**
+    /*
      * to fill the meta data required for value compression model
      */
     for (int i = 0; i < dataTypeSelected.length; i++) {  // always 1
@@ -1390,26 +1351,22 @@ public final class CarbonUtil {
 
   public static DataChunk3 readDataChunk3(ByteBuffer dataChunkBuffer, int offset, int length)
       throws IOException {
-    byte[] data = new byte[length];
-    dataChunkBuffer.position(offset);
-    dataChunkBuffer.get(data);
+    byte[] data = dataChunkBuffer.array();
     return (DataChunk3) read(data, new ThriftReader.TBaseCreator() {
       @Override public TBase create() {
         return new DataChunk3();
       }
-    }, 0, length);
+    }, offset, length);
   }
 
   public static DataChunk2 readDataChunk(ByteBuffer dataChunkBuffer, int offset, int length)
       throws IOException {
-    byte[] data = new byte[length];
-    dataChunkBuffer.position(offset);
-    dataChunkBuffer.get(data);
+    byte[] data = dataChunkBuffer.array();
     return (DataChunk2) read(data, new ThriftReader.TBaseCreator() {
       @Override public TBase create() {
         return new DataChunk2();
       }
-    }, 0, length);
+    }, offset, length);
   }
 
   /**
@@ -1466,7 +1423,7 @@ public final class CarbonUtil {
     ValueEncoderMeta valueEncoderMeta = new ValueEncoderMeta();
     valueEncoderMeta.setType(measureType);
     switch (measureType) {
-      case CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE:
+      case CarbonCommonConstants.DOUBLE_MEASURE:
         valueEncoderMeta.setMaxValue(buffer.getDouble());
         valueEncoderMeta.setMinValue(buffer.getDouble());
         valueEncoderMeta.setUniqueValue(buffer.getDouble());

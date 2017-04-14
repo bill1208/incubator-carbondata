@@ -15,14 +15,6 @@
  * limitations under the License.
  */
 
-/**
- * Project Name  : Carbon
- * Module Name   : CARBON Data Processor
- * Created Date  : 15-Sep-2015
- * FileName   : LoadMetadataUtil.java
- * Description   : Kettle step to generate MD Key
- * Class Version  : 1.0
- */
 package org.apache.carbondata.spark.util;
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
@@ -31,6 +23,9 @@ import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.statusmanager.LoadMetadataDetails;
 import org.apache.carbondata.core.statusmanager.SegmentStatusManager;
 
+/**
+ * Utility for load data
+ */
 public final class LoadMetadataUtil {
   private LoadMetadataUtil() {
 

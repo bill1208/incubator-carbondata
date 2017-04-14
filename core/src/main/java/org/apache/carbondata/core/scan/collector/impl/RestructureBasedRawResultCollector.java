@@ -33,7 +33,6 @@ import org.apache.carbondata.core.scan.executor.infos.BlockExecutionInfo;
 import org.apache.carbondata.core.scan.model.QueryDimension;
 import org.apache.carbondata.core.scan.model.QueryMeasure;
 import org.apache.carbondata.core.scan.result.AbstractScannedResult;
-import org.apache.carbondata.core.scan.wrappers.ByteArrayWrapper;
 import org.apache.carbondata.core.util.CarbonUtil;
 
 import org.apache.commons.lang3.ArrayUtils;
@@ -153,7 +152,6 @@ public class RestructureBasedRawResultCollector extends RawBasedResultCollector 
   @Override public List<Object[]> collectData(AbstractScannedResult scannedResult, int batchSize) {
     List<Object[]> listBasedResult = new ArrayList<>(batchSize);
     QueryMeasure[] queryMeasures = tableBlockExecutionInfos.getActualQueryMeasures();
-    ByteArrayWrapper wrapper = null;
     BlockletLevelDeleteDeltaDataCache deleteDeltaDataCache =
         scannedResult.getDeleteDeltaDataCache();
     // scan the record and add to list
@@ -185,9 +183,13 @@ public class RestructureBasedRawResultCollector extends RawBasedResultCollector 
    */
   private byte[] fillDictionaryKeyArrayWithLatestSchema(byte[] dictionaryKeyArray) {
     QueryDimension[] actualQueryDimensions = tableBlockExecutionInfos.getActualQueryDimensions();
-    long[] keyArray = updatedCurrentBlockKeyGenerator.getKeyArray(dictionaryKeyArray);
-    long[] keyArrayWithNewAddedColumns =
-        new long[keyArray.length + dimensionInfo.getNewDictionaryColumnCount()];
+    int newKeyArrayLength = dimensionInfo.getNewDictionaryColumnCount();
+    long[] keyArray = null;
+    if (null != updatedCurrentBlockKeyGenerator) {
+      keyArray = updatedCurrentBlockKeyGenerator.getKeyArray(dictionaryKeyArray);
+      newKeyArrayLength += keyArray.length;
+    }
+    long[] keyArrayWithNewAddedColumns = new long[newKeyArrayLength];
     int existingColumnKeyArrayIndex = 0;
     int newKeyArrayIndex = 0;
     for (int i = 0; i < dimensionInfo.getDimensionExists().length; i++) {
@@ -230,7 +232,8 @@ public class RestructureBasedRawResultCollector extends RawBasedResultCollector 
     int existingColumnValueIndex = 0;
     int newKeyArrayIndex = 0;
     for (int i = 0; i < dimensionInfo.getDimensionExists().length; i++) {
-      if (!actualQueryDimensions[i].getDimension().hasEncoding(Encoding.DICTIONARY)) {
+      if (!actualQueryDimensions[i].getDimension().hasEncoding(Encoding.DICTIONARY)
+          && !actualQueryDimensions[i].getDimension().hasEncoding(Encoding.IMPLICIT)) {
         // if dimension exists then add the byte array value else add the default value
         if (dimensionInfo.getDimensionExists()[i]) {
           noDictionaryKeyArrayWithNewlyAddedColumns[newKeyArrayIndex++] =

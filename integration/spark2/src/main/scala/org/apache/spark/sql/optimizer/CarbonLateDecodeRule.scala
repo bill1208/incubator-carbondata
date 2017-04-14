@@ -60,7 +60,11 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
     if (relations.nonEmpty && !isOptimized(plan)) {
       // In case scalar subquery skip the transformation and update the flag.
       if (relations.exists(_.carbonRelation.isSubquery.nonEmpty)) {
-        relations.foreach(p => p.carbonRelation.isSubquery.remove(0))
+        relations.foreach{carbonDecoderRelation =>
+          if (carbonDecoderRelation.carbonRelation.isSubquery.nonEmpty) {
+            carbonDecoderRelation.carbonRelation.isSubquery.remove(0)
+          }
+        }
         LOGGER.info("Skip CarbonOptimizer for scalar/predicate sub query")
         return plan
       }
@@ -168,7 +172,21 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
           if (attrsOnSort.size() > 0 && !child.isInstanceOf[Sort]) {
             child = CarbonDictionaryTempDecoder(attrsOnSort,
               new util.HashSet[AttributeReferenceWrapper](), sort.child)
+          } else {
+            // In case of select * from query it gets logical relation and there is no way
+            // to convert the datatypes of attributes, so just add this dummy decoder to convert
+            // to dictionary datatypes.
+            child match {
+              case l: LogicalRelation =>
+                child = CarbonDictionaryTempDecoder(new util.HashSet[AttributeReferenceWrapper](),
+                  new util.HashSet[AttributeReferenceWrapper](), sort.child)
+              case Filter(cond, l: LogicalRelation) =>
+                child = CarbonDictionaryTempDecoder(new util.HashSet[AttributeReferenceWrapper](),
+                  new util.HashSet[AttributeReferenceWrapper](), sort.child)
+              case _ =>
+            }
           }
+
           if (!decoder) {
             decoder = true
             CarbonDictionaryTempDecoder(new util.HashSet[AttributeReferenceWrapper](),
@@ -182,9 +200,13 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
           if !union.children.exists(_.isInstanceOf[CarbonDictionaryTempDecoder]) =>
           val children = union.children.map { child =>
             val condAttrs = new util.HashSet[AttributeReferenceWrapper]
+            val localAliasMap = CarbonAliasDecoderRelation()
+            // collect alias information for the child plan again. It is required as global alias
+            // may have duplicated in case of aliases
+            collectInformationOnAttributes(child, localAliasMap)
             child.output.foreach(attr =>
-              if (isDictionaryEncoded(attr, attrMap, aliasMap)) {
-                condAttrs.add(AttributeReferenceWrapper(aliasMap.getOrElse(attr, attr)))
+              if (isDictionaryEncoded(attr, attrMap, localAliasMap)) {
+                condAttrs.add(AttributeReferenceWrapper(localAliasMap.getOrElse(attr, attr)))
               }
             )
 
@@ -192,7 +214,7 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
               !child.isInstanceOf[CarbonDictionaryCatalystDecoder]) {
               CarbonDictionaryTempDecoder(condAttrs,
                 new util.HashSet[AttributeReferenceWrapper](),
-                child)
+                child, false, Some(localAliasMap))
             } else {
               child
             }
@@ -472,16 +494,18 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
   }
 
   private def updateTempDecoder(plan: LogicalPlan,
-      aliasMap: CarbonAliasDecoderRelation,
+      aliasMapOriginal: CarbonAliasDecoderRelation,
       attrMap: java.util.HashMap[AttributeReferenceWrapper, CarbonDecoderRelation]):
   LogicalPlan = {
     var allAttrsNotDecode: util.Set[AttributeReferenceWrapper] =
       new util.HashSet[AttributeReferenceWrapper]()
     val marker = new CarbonPlanMarker
+    var aliasMap: CarbonAliasDecoderRelation = aliasMapOriginal
     plan transformDown {
       case cd: CarbonDictionaryTempDecoder if !cd.processed =>
         cd.processed = true
         allAttrsNotDecode = cd.attrsNotDecode
+        aliasMap = cd.aliasMap.getOrElse(aliasMapOriginal)
         marker.pushMarker(allAttrsNotDecode)
         if (cd.isOuter) {
           CarbonDictionaryCatalystDecoder(relations,
@@ -603,9 +627,16 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
     }
     // Remove unnecessary decoders
     val finalPlan = transFormedPlan transform {
-      case CarbonDictionaryCatalystDecoder(_, profile, _, false, child)
-        if profile.isInstanceOf[IncludeProfile] && profile.isEmpty =>
-        child
+      case cd@ CarbonDictionaryCatalystDecoder(_, profile, _, false, child) =>
+        if (profile.isInstanceOf[IncludeProfile] && profile.isEmpty) {
+          child match {
+            case l: LogicalRelation => cd
+            case Filter(condition, l: LogicalRelation) => cd
+            case _ => child
+          }
+        } else {
+          cd
+        }
     }
     finalPlan
   }

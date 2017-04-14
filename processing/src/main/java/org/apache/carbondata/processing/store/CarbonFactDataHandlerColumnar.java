@@ -50,6 +50,7 @@ import org.apache.carbondata.core.datastore.columnar.ColumnGroupModel;
 import org.apache.carbondata.core.datastore.columnar.IndexStorage;
 import org.apache.carbondata.core.datastore.compression.WriterCompressModel;
 import org.apache.carbondata.core.datastore.dataholder.CarbonWriteDataHolder;
+import org.apache.carbondata.core.datastore.impl.data.compressed.HeavyCompressedDoubleArrayDataStore;
 import org.apache.carbondata.core.keygenerator.KeyGenException;
 import org.apache.carbondata.core.keygenerator.KeyGenerator;
 import org.apache.carbondata.core.keygenerator.columnar.ColumnarSplitter;
@@ -65,17 +66,16 @@ import org.apache.carbondata.core.util.DataTypeUtil;
 import org.apache.carbondata.core.util.NodeHolder;
 import org.apache.carbondata.core.util.ValueCompressionUtil;
 import org.apache.carbondata.processing.datatypes.GenericDataType;
-import org.apache.carbondata.processing.mdkeygen.file.FileManager;
-import org.apache.carbondata.processing.mdkeygen.file.IFileManagerComposite;
 import org.apache.carbondata.processing.store.colgroup.ColGroupBlockStorage;
 import org.apache.carbondata.processing.store.colgroup.ColGroupDataHolder;
 import org.apache.carbondata.processing.store.colgroup.ColGroupMinMax;
 import org.apache.carbondata.processing.store.colgroup.ColumnDataHolder;
 import org.apache.carbondata.processing.store.colgroup.DataHolder;
+import org.apache.carbondata.processing.store.file.FileManager;
+import org.apache.carbondata.processing.store.file.IFileManagerComposite;
 import org.apache.carbondata.processing.store.writer.CarbonDataWriterVo;
 import org.apache.carbondata.processing.store.writer.CarbonFactDataWriter;
 import org.apache.carbondata.processing.store.writer.exception.CarbonDataWriterException;
-import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
 import org.apache.carbondata.processing.util.NonDictionaryUtil;
 
 import org.apache.spark.sql.types.Decimal;
@@ -256,8 +256,6 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
    */
   private boolean compactionFlow;
 
-  private boolean useKettle;
-
   private int bucketNumber;
 
   private long schemaUpdatedTimeStamp;
@@ -279,7 +277,6 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     this.dimensionCount = carbonFactDataHandlerModel.getDimensionCount();
     this.complexIndexMap = carbonFactDataHandlerModel.getComplexIndexMap();
     this.primitiveDimLens = carbonFactDataHandlerModel.getPrimitiveDimLens();
-    this.useKettle = carbonFactDataHandlerModel.isUseKettle();
     this.isAggKeyBlock = Boolean.parseBoolean(CarbonProperties.getInstance()
         .getProperty(CarbonCommonConstants.AGGREAGATE_COLUMNAR_KEY_BLOCK,
             CarbonCommonConstants.AGGREAGATE_COLUMNAR_KEY_BLOCK_DEFAULTVALUE));
@@ -481,420 +478,224 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     }
   }
 
-  // TODO remove after kettle flow is removed
-  private NodeHolder processDataRows(List<Object[]> dataRows) throws CarbonDataWriterException {
-    Object[] max = new Object[measureCount];
-    Object[] min = new Object[measureCount];
-    int[] decimal = new int[measureCount];
-    Object[] uniqueValue = new Object[measureCount];
-    // to store index of the measure columns which are null
-    BitSet[] nullValueIndexBitSet = getMeasureNullValueIndexBitSet(measureCount);
-    for (int i = 0; i < max.length; i++) {
-      if (type[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
-        max[i] = Long.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE) {
-        max[i] = -Double.MAX_VALUE;
-      } else if (type[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-        max[i] = new BigDecimal(-Double.MAX_VALUE);
-      } else {
-        max[i] = 0.0;
-      }
-    }
-    for (int i = 0; i < min.length; i++) {
-      if (type[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
-        min[i] = Long.MAX_VALUE;
-        uniqueValue[i] = Long.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE) {
-        min[i] = Double.MAX_VALUE;
-        uniqueValue[i] = Double.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-        min[i] = new BigDecimal(Double.MAX_VALUE);
-        uniqueValue[i] = new BigDecimal(Double.MIN_VALUE);
-      } else {
-        min[i] = 0.0;
-        uniqueValue[i] = 0.0;
-      }
-    }
-    for (int i = 0; i < decimal.length; i++) {
-      decimal[i] = 0;
-    }
+  /** statics for one blocklet/page */
+  class Statistics {
+    /** min and max value of the measures */
+    Object[] min, max;
 
-    byte[] startKey = null;
-    byte[] endKey = null;
-    byte[] noDictStartKey = null;
-    byte[] noDictEndKey = null;
-    CarbonWriteDataHolder[] dataHolder = initialiseDataHolder(dataRows.size());
-    CarbonWriteDataHolder keyDataHolder = initialiseKeyBlockHolder(dataRows.size());
-    CarbonWriteDataHolder noDictionaryKeyDataHolder = null;
-    if ((noDictionaryCount + complexColCount) > 0) {
-      noDictionaryKeyDataHolder = initialiseKeyBlockHolder(dataRows.size());
-    }
+    /**
+     * the unique value is the non-exist value in the row,
+     * and will be used as storage key for null values of measures
+     */
+    Object[] uniqueValue;
 
-    for (int count = 0; count < dataRows.size(); count++) {
-      Object[] row = dataRows.get(count);
-      byte[] mdKey = (byte[]) row[this.mdKeyIndex];
-      byte[] noDictionaryKey = null;
-      if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-        noDictionaryKey = (byte[]) row[this.mdKeyIndex - 1];
-      }
-      ByteBuffer byteBuffer = null;
-      byte[] b = null;
-      if (count == 0) {
-        startKey = mdKey;
-        noDictStartKey = noDictionaryKey;
-      }
-      endKey = mdKey;
-      noDictEndKey = noDictionaryKey;
-      // add to key store
-      if (mdKey.length > 0) {
-        keyDataHolder.setWritableByteArrayValueByIndex(count, mdKey);
-      }
-      // for storing the byte [] for high card.
-      if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-        noDictionaryKeyDataHolder.setWritableByteArrayValueByIndex(count, noDictionaryKey);
-      }
-      //Add all columns to keyDataHolder
-      keyDataHolder.setWritableByteArrayValueByIndex(count, this.mdKeyIndex, row);
-      // CHECKSTYLE:OFF Approval No:Approval-351
-      for (int k = 0; k < otherMeasureIndex.length; k++) {
-        if (type[otherMeasureIndex[k]] == CarbonCommonConstants.BIG_INT_MEASURE) {
-          if (null == row[otherMeasureIndex[k]]) {
-            nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
-            dataHolder[otherMeasureIndex[k]].setWritableLongValueByIndex(count, 0L);
-          } else {
-            dataHolder[otherMeasureIndex[k]]
-                .setWritableLongValueByIndex(count, row[otherMeasureIndex[k]]);
-          }
+    /** decimal count of the measures */
+    int[] decimal;
+
+    Statistics(int measureCount) {
+      max = new Object[measureCount];
+      min = new Object[measureCount];
+      uniqueValue = new Object[measureCount];
+      decimal = new int[measureCount];
+      for (int i = 0; i < measureCount; i++) {
+        if (type[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
+          max[i] = Long.MIN_VALUE;
+          min[i] = Long.MAX_VALUE;
+          uniqueValue[i] = Long.MIN_VALUE;
+        } else if (type[i] == CarbonCommonConstants.DOUBLE_MEASURE) {
+          max[i] = Double.MIN_VALUE;
+          min[i] = Double.MAX_VALUE;
+          uniqueValue[i] = Double.MIN_VALUE;
+        } else if (type[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
+          max[i] = new BigDecimal(Double.MIN_VALUE);
+          min[i] = new BigDecimal(Double.MAX_VALUE);
+          uniqueValue[i] = new BigDecimal(Double.MIN_VALUE);
         } else {
-          if (null == row[otherMeasureIndex[k]]) {
-            nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
-            dataHolder[otherMeasureIndex[k]].setWritableDoubleValueByIndex(count, 0.0);
-          } else {
-            dataHolder[otherMeasureIndex[k]]
-                .setWritableDoubleValueByIndex(count, row[otherMeasureIndex[k]]);
+          max[i] = 0.0;
+          min[i] = 0.0;
+          uniqueValue[i] = 0.0;
+        }
+        decimal[i] = 0;
+      }
+    }
+
+    /**
+     * update the statistics for the input row
+     */
+    void update(int[] msrIndex, Object[] row, boolean compactionFlow) {
+      // Update row level min max
+      for (int i = 0; i < msrIndex.length; i++) {
+        int count = msrIndex[i];
+        if (row[count] != null) {
+          if (type[count] == CarbonCommonConstants.DOUBLE_MEASURE) {
+            double value = (double) row[count];
+            double maxVal = (double) max[count];
+            double minVal = (double) min[count];
+            max[count] = (maxVal > value ? max[count] : value);
+            min[count] = (minVal < value ? min[count] : value);
+            int num = getDecimalCount(value);
+            decimal[count] = (decimal[count] > num ? decimal[count] : num);
+            uniqueValue[count] = (double) min[count] - 1;
+          } else if (type[count] == CarbonCommonConstants.BIG_INT_MEASURE) {
+            long value = (long) row[count];
+            long maxVal = (long) max[count];
+            long minVal = (long) min[count];
+            max[count] = (maxVal > value ? max[count] : value);
+            min[count] = (minVal < value ? min[count] : value);
+            uniqueValue[count] = (long) min[count] - 1;
+          } else if (type[count] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
+            byte[] buff = null;
+            // in compaction flow the measure with decimal type will come as spark decimal.
+            // need to convert it to byte array.
+            if (compactionFlow) {
+              BigDecimal bigDecimal = ((Decimal) row[count]).toJavaBigDecimal();
+              buff = DataTypeUtil.bigDecimalToByte(bigDecimal);
+            } else {
+              buff = (byte[]) row[count];
+            }
+            BigDecimal value = DataTypeUtil.byteToBigDecimal(buff);
+            decimal[count] = value.scale();
+            BigDecimal val = (BigDecimal) min[count];
+            uniqueValue[count] = (val.subtract(new BigDecimal(1.0)));
           }
         }
       }
-      calculateMaxMin(max, min, decimal, otherMeasureIndex, row);
-      for (int i = 0; i < customMeasureIndex.length; i++) {
-        if (null == row[customMeasureIndex[i]]
-            && type[customMeasureIndex[i]] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-          BigDecimal val = BigDecimal.valueOf(0);
-          b = DataTypeUtil.bigDecimalToByte(val);
-          nullValueIndexBitSet[customMeasureIndex[i]].set(count);
-        } else {
-          if (this.compactionFlow) {
-            BigDecimal bigDecimal = ((Decimal) row[customMeasureIndex[i]]).toJavaBigDecimal();
-            b = DataTypeUtil.bigDecimalToByte(bigDecimal);
-          } else {
-            b = (byte[]) row[customMeasureIndex[i]];
-          }
-        }
-        byteBuffer = ByteBuffer.allocate(b.length + CarbonCommonConstants.INT_SIZE_IN_BYTE);
-        byteBuffer.putInt(b.length);
-        byteBuffer.put(b);
-        byteBuffer.flip();
-        b = byteBuffer.array();
-        dataHolder[customMeasureIndex[i]].setWritableByteArrayValueByIndex(count, b);
-      }
-      calculateMaxMin(max, min, decimal, customMeasureIndex, row);
     }
-    calculateUniqueValue(min, uniqueValue);
-    byte[][] byteArrayValues = keyDataHolder.getByteArrayValues().clone();
-    byte[][] noDictionaryValueHolder = null;
-    if ((noDictionaryCount + complexColCount) > 0) {
-      noDictionaryValueHolder = noDictionaryKeyDataHolder.getByteArrayValues();
-    }
-    WriterCompressModel compressionModel = ValueCompressionUtil
-        .getWriterCompressModel(max, min, decimal, uniqueValue, type, new byte[max.length]);
-    byte[][] writableMeasureDataArray =
-        StoreFactory.createDataStore(compressionModel).getWritableMeasureDataArray(dataHolder)
-            .clone();
-    NodeHolder nodeHolder =
-        getNodeHolderObject(writableMeasureDataArray, byteArrayValues, dataRows.size(), startKey,
-            endKey, compressionModel, noDictionaryValueHolder, noDictStartKey, noDictEndKey,
-            nullValueIndexBitSet);
-    LOGGER.info("Number Of records processed: " + dataRows.size());
-    return nodeHolder;
   }
 
-  private NodeHolder processDataRowsWithOutKettle(List<Object[]> dataRows)
-      throws CarbonDataWriterException {
-    Object[] max = new Object[measureCount];
-    Object[] min = new Object[measureCount];
-    int[] decimal = new int[measureCount];
-    Object[] uniqueValue = new Object[measureCount];
-    // to store index of the measure columns which are null
-    BitSet[] nullValueIndexBitSet = getMeasureNullValueIndexBitSet(measureCount);
-    for (int i = 0; i < max.length; i++) {
-      if (type[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
-        max[i] = Long.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE) {
-        max[i] = -Double.MAX_VALUE;
-      } else if (type[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-        max[i] = new BigDecimal(0.0);
-      } else {
-        max[i] = 0.0;
-      }
-    }
-    for (int i = 0; i < min.length; i++) {
-      if (type[i] == CarbonCommonConstants.BIG_INT_MEASURE) {
-        min[i] = Long.MAX_VALUE;
-        uniqueValue[i] = Long.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE) {
-        min[i] = Double.MAX_VALUE;
-        uniqueValue[i] = Double.MIN_VALUE;
-      } else if (type[i] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-        min[i] = new BigDecimal(Double.MAX_VALUE);
-        uniqueValue[i] = new BigDecimal(Double.MIN_VALUE);
-      } else {
-        min[i] = 0.0;
-        uniqueValue[i] = 0.0;
-      }
-    }
-    for (int i = 0; i < decimal.length; i++) {
-      decimal[i] = 0;
-    }
-
+  class IndexKey {
+    byte[] currentMDKey = null;
+    byte[][] currentNoDictionaryKey = null;
     byte[] startKey = null;
     byte[] endKey = null;
     byte[][] noDictStartKey = null;
     byte[][] noDictEndKey = null;
-    CarbonWriteDataHolder[] dataHolder = initialiseDataHolder(dataRows.size());
-    CarbonWriteDataHolder keyDataHolder = initialiseKeyBlockHolderWithOutKettle(dataRows.size());
-    CarbonWriteDataHolder noDictionaryKeyDataHolder = null;
+
+    /** update all keys based on the input row */
+    void update(Object[] row, boolean firstRow) {
+      currentMDKey = (byte[]) row[mdKeyIndex];
+      if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
+        currentNoDictionaryKey = (byte[][]) row[mdKeyIndex - 1];
+      }
+      if (firstRow) {
+        startKey = currentMDKey;
+        noDictStartKey = currentNoDictionaryKey;
+      }
+      endKey = currentMDKey;
+      noDictEndKey = currentNoDictionaryKey;
+    }
+  }
+
+  /** generate the NodeHolder from the input rows */
+  private NodeHolder processDataRows(List<Object[]> dataRows)
+      throws CarbonDataWriterException {
+    // to store index of the measure columns which are null
+    BitSet[] nullValueIndexBitSet = getMeasureNullValueIndexBitSet(measureCount);
+    // statistics for one blocklet/page
+    Statistics stats = new Statistics(measureCount);
+    IndexKey keys = new IndexKey();
+
+    // initialize measureHolder, mdKeyHolder and noDictionaryHolder, these three Holders
+    // are the input for final encoding
+    CarbonWriteDataHolder[] measureHolder = initialiseDataHolder(dataRows.size());
+    CarbonWriteDataHolder mdKeyHolder = initialiseKeyBlockHolder(dataRows.size());
+    CarbonWriteDataHolder noDictionaryHolder = null;
     if ((noDictionaryCount + complexColCount) > 0) {
-      noDictionaryKeyDataHolder = initialiseKeyBlockHolderForNonDictionary(dataRows.size());
+      noDictionaryHolder = initialiseKeyBlockHolderForNonDictionary(dataRows.size());
     }
 
+    // loop on the input rows, fill measureHolder, mdKeyHolder and noDictionaryHolder
     for (int count = 0; count < dataRows.size(); count++) {
       Object[] row = dataRows.get(count);
-      byte[] mdKey = (byte[]) row[this.mdKeyIndex];
-      byte[][] noDictionaryKey = null;
+      keys.update(row, (count == 0));
+      if (keys.currentMDKey.length > 0) {
+        mdKeyHolder.setWritableByteArrayValueByIndex(count, keys.currentMDKey);
+      }
       if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-        noDictionaryKey = (byte[][]) row[this.mdKeyIndex - 1];
+        noDictionaryHolder.setWritableNonDictByteArrayValueByIndex(count,
+            keys.currentNoDictionaryKey);
       }
-      ByteBuffer byteBuffer = null;
-      byte[] b = null;
-      if (count == 0) {
-        startKey = mdKey;
-        noDictStartKey = noDictionaryKey;
-      }
-      endKey = mdKey;
-      noDictEndKey = noDictionaryKey;
-      // add to key store
-      if (mdKey.length > 0) {
-        keyDataHolder.setWritableByteArrayValueByIndex(count, mdKey);
-      }
-      // for storing the byte [] for high card.
-      if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-        noDictionaryKeyDataHolder.setWritableNonDictByteArrayValueByIndex(count, noDictionaryKey);
-      }
+      fillMeasureHolder(row, count, measureHolder, nullValueIndexBitSet);
+      stats.update(otherMeasureIndex, row, compactionFlow);
+      stats.update(customMeasureIndex, row, compactionFlow);
+    }
 
-      for (int k = 0; k < otherMeasureIndex.length; k++) {
-        if (type[otherMeasureIndex[k]] == CarbonCommonConstants.BIG_INT_MEASURE) {
-          if (null == row[otherMeasureIndex[k]]) {
-            nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
-            dataHolder[otherMeasureIndex[k]].setWritableLongValueByIndex(count, 0L);
-          } else {
-            dataHolder[otherMeasureIndex[k]]
-                .setWritableLongValueByIndex(count, row[otherMeasureIndex[k]]);
-          }
-        } else {
-          if (null == row[otherMeasureIndex[k]]) {
-            nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
-            dataHolder[otherMeasureIndex[k]].setWritableDoubleValueByIndex(count, 0.0);
-          } else {
-            dataHolder[otherMeasureIndex[k]]
-                .setWritableDoubleValueByIndex(count, row[otherMeasureIndex[k]]);
-          }
-        }
-      }
-      calculateMaxMin(max, min, decimal, otherMeasureIndex, row);
-      for (int i = 0; i < customMeasureIndex.length; i++) {
-        if (null == row[customMeasureIndex[i]]
-            && type[customMeasureIndex[i]] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
-          BigDecimal val = BigDecimal.valueOf(0);
-          b = DataTypeUtil.bigDecimalToByte(val);
-          nullValueIndexBitSet[customMeasureIndex[i]].set(count);
-        } else {
-          if (this.compactionFlow) {
-            BigDecimal bigDecimal = ((Decimal) row[customMeasureIndex[i]]).toJavaBigDecimal();
-            b = DataTypeUtil.bigDecimalToByte(bigDecimal);
-          } else {
-            b = (byte[]) row[customMeasureIndex[i]];
-          }
-        }
-        BigDecimal value = DataTypeUtil.byteToBigDecimal(b);
-        String[] bigdVals = value.toPlainString().split("\\.");
-        long[] bigDvalue = new long[2];
-        if (bigdVals.length == 2) {
-          bigDvalue[0] = Long.parseLong(bigdVals[0]);
-          BigDecimal bd = new BigDecimal(CarbonCommonConstants.POINT + bigdVals[1]);
-          bigDvalue[1] = (long) (bd.doubleValue() * Math.pow(10, value.scale()));
-        } else {
-          bigDvalue[0] = Long.parseLong(bigdVals[0]);
-        }
-        byteBuffer = ByteBuffer.allocate(b.length + CarbonCommonConstants.INT_SIZE_IN_BYTE);
-        byteBuffer.putInt(b.length);
-        byteBuffer.put(b);
-        byteBuffer.flip();
-        b = byteBuffer.array();
-        dataHolder[customMeasureIndex[i]].setWritableByteArrayValueByIndex(count, b);
-      }
-      calculateMaxMin(max, min, decimal, customMeasureIndex, row);
-    }
-    calculateUniqueValue(min, uniqueValue);
-    byte[][] byteArrayValues = keyDataHolder.getByteArrayValues().clone();
-    byte[][][] noDictionaryValueHolder = null;
+    // generate encoded byte array for 3 holders
+    // for measure columns: encode and compress the measureHolder
+    WriterCompressModel compressionModel =
+        ValueCompressionUtil.getWriterCompressModel(
+            stats.max, stats.min, stats.decimal, stats.uniqueValue, type, new byte[measureCount]);
+    byte[][] encodedMeasureArray =
+        HeavyCompressedDoubleArrayDataStore.encodeMeasureDataArray(
+            compressionModel, measureHolder);
+
+    // for mdkey and noDictionary, it is already in bytes, just get the array from holder
+    byte[][] mdKeyArray = mdKeyHolder.getByteArrayValues();
+    byte[][][] noDictionaryArray = null;
     if ((noDictionaryCount + complexColCount) > 0) {
-      noDictionaryValueHolder = noDictionaryKeyDataHolder.getNonDictByteArrayValues();
+      noDictionaryArray = noDictionaryHolder.getNonDictByteArrayValues();
     }
-    WriterCompressModel compressionModel = ValueCompressionUtil
-        .getWriterCompressModel(max, min, decimal, uniqueValue, type, new byte[max.length]);
-    byte[][] writableMeasureDataArray =
-        StoreFactory.createDataStore(compressionModel).getWritableMeasureDataArray(dataHolder)
-            .clone();
+
+    // create NodeHolder using these encoded byte arrays
     NodeHolder nodeHolder =
-        getNodeHolderObjectWithOutKettle(writableMeasureDataArray, byteArrayValues, dataRows.size(),
-            startKey, endKey, compressionModel, noDictionaryValueHolder, noDictStartKey,
-            noDictEndKey, nullValueIndexBitSet);
+        createNodeHolderObjectWithOutKettle(
+            encodedMeasureArray, mdKeyArray, noDictionaryArray, dataRows.size(),
+            keys.startKey, keys.endKey, compressionModel, keys.noDictStartKey, keys.noDictEndKey,
+            nullValueIndexBitSet);
     LOGGER.info("Number Of records processed: " + dataRows.size());
     return nodeHolder;
   }
 
-  // TODO remove after kettle flow is removed
-  private NodeHolder getNodeHolderObject(byte[][] dataHolderLocal, byte[][] byteArrayValues,
-      int entryCountLocal, byte[] startkeyLocal, byte[] endKeyLocal,
-      WriterCompressModel compressionModel, byte[][] noDictionaryData, byte[] noDictionaryStartKey,
-      byte[] noDictionaryEndKey, BitSet[] nullValueIndexBitSet) throws CarbonDataWriterException {
-    byte[][][] noDictionaryColumnsData = null;
-    List<ArrayList<byte[]>> colsAndValues = new ArrayList<ArrayList<byte[]>>();
-    int complexColCount = getComplexColsCount();
-
-    for (int i = 0; i < complexColCount; i++) {
-      colsAndValues.add(new ArrayList<byte[]>());
-    }
-    int noOfColumn = colGrpModel.getNoOfColumnStore();
-    DataHolder[] dataHolders = getDataHolders(noOfColumn, byteArrayValues.length);
-    for (int i = 0; i < byteArrayValues.length; i++) {
-      byte[][] splitKey = columnarSplitter.splitKey(byteArrayValues[i]);
-
-      for (int j = 0; j < splitKey.length; j++) {
-        dataHolders[j].addData(splitKey[j], i);
-      }
-    }
-    if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-      noDictionaryColumnsData = new byte[noDictionaryCount][noDictionaryData.length][];
-      for (int i = 0; i < noDictionaryData.length; i++) {
-        int complexColumnIndex = primitiveDimLens.length + noDictionaryCount;
-        byte[][] splitKey = NonDictionaryUtil
-            .splitNoDictionaryKey(noDictionaryData[i], noDictionaryCount + complexIndexMap.size());
-
-        int complexTypeIndex = 0;
-        for (int j = 0; j < splitKey.length; j++) {
-          //nodictionary Columns
-          if (j < noDictionaryCount) {
-            noDictionaryColumnsData[j][i] = splitKey[j];
-          }
-          //complex types
-          else {
-            // Need to write columnar block from complex byte array
-            int index = complexColumnIndex - noDictionaryCount;
-            GenericDataType complexDataType = complexIndexMap.get(index);
-            complexColumnIndex++;
-            if (complexDataType != null) {
-              List<ArrayList<byte[]>> columnsArray = new ArrayList<ArrayList<byte[]>>();
-              for (int k = 0; k < complexDataType.getColsCount(); k++) {
-                columnsArray.add(new ArrayList<byte[]>());
-              }
-
-              try {
-                ByteBuffer complexDataWithoutBitPacking = ByteBuffer.wrap(splitKey[j]);
-                byte[] complexTypeData = new byte[complexDataWithoutBitPacking.getShort()];
-                complexDataWithoutBitPacking.get(complexTypeData);
-
-                ByteBuffer byteArrayInput = ByteBuffer.wrap(complexTypeData);
-                ByteArrayOutputStream byteArrayOutput = new ByteArrayOutputStream();
-                DataOutputStream dataOutputStream = new DataOutputStream(byteArrayOutput);
-                complexDataType
-                    .parseAndBitPack(byteArrayInput, dataOutputStream, this.complexKeyGenerator);
-                complexDataType.getColumnarDataForComplexType(columnsArray,
-                    ByteBuffer.wrap(byteArrayOutput.toByteArray()));
-                byteArrayOutput.close();
-              } catch (IOException e) {
-                throw new CarbonDataWriterException(
-                    "Problem while bit packing and writing complex datatype", e);
-              } catch (KeyGenException e) {
-                throw new CarbonDataWriterException(
-                    "Problem while bit packing and writing complex datatype", e);
-              }
-
-              for (ArrayList<byte[]> eachColumn : columnsArray) {
-                colsAndValues.get(complexTypeIndex++).addAll(eachColumn);
-              }
-            } else {
-              // This case not possible as ComplexType is the last columns
-            }
-          }
-        }
-      }
-    }
-    thread_pool_size = Integer.parseInt(CarbonProperties.getInstance()
-        .getProperty(CarbonCommonConstants.NUM_CORES_BLOCK_SORT,
-            CarbonCommonConstants.NUM_CORES_BLOCK_SORT_DEFAULT_VAL));
-    ExecutorService executorService = Executors.newFixedThreadPool(thread_pool_size);
-    List<Future<IndexStorage>> submit = new ArrayList<Future<IndexStorage>>(
-        primitiveDimLens.length + noDictionaryCount + complexColCount);
-    int i = 0;
-    int dictionaryColumnCount = -1;
-    int noDictionaryColumnCount = -1;
-    for (i = 0; i < dimensionType.length; i++) {
-      if (dimensionType[i]) {
-        dictionaryColumnCount++;
-        if (colGrpModel.isColumnar(dictionaryColumnCount)) {
-          submit.add(executorService.submit(
-              new BlockSortThread(i, dataHolders[dictionaryColumnCount].getData(), true,
-                  isUseInvertedIndex[i])));
+  private void fillMeasureHolder(Object[] row, int count, CarbonWriteDataHolder[] measureHolder,
+      BitSet[] nullValueIndexBitSet) {
+    for (int k = 0; k < otherMeasureIndex.length; k++) {
+      if (type[otherMeasureIndex[k]] == CarbonCommonConstants.BIG_INT_MEASURE) {
+        if (null == row[otherMeasureIndex[k]]) {
+          nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
+          measureHolder[otherMeasureIndex[k]].setWritableLongValueByIndex(count, 0L);
         } else {
-          submit.add(
-              executorService.submit(new ColGroupBlockStorage(dataHolders[dictionaryColumnCount])));
+          measureHolder[otherMeasureIndex[k]]
+              .setWritableLongValueByIndex(count, row[otherMeasureIndex[k]]);
         }
       } else {
-        submit.add(executorService.submit(
-            new BlockSortThread(i, noDictionaryColumnsData[++noDictionaryColumnCount], false, true,
-                true, isUseInvertedIndex[i])));
+        if (null == row[otherMeasureIndex[k]]) {
+          nullValueIndexBitSet[otherMeasureIndex[k]].set(count);
+          measureHolder[otherMeasureIndex[k]].setWritableDoubleValueByIndex(count, 0.0);
+        } else {
+          measureHolder[otherMeasureIndex[k]]
+              .setWritableDoubleValueByIndex(count, row[otherMeasureIndex[k]]);
+        }
       }
     }
-    for (int k = 0; k < complexColCount; k++) {
-      submit.add(executorService.submit(new BlockSortThread(i++,
-          colsAndValues.get(k).toArray(new byte[colsAndValues.get(k).size()][]), false, true)));
-    }
-    executorService.shutdown();
-    try {
-      executorService.awaitTermination(1, TimeUnit.DAYS);
-    } catch (InterruptedException e) {
-      LOGGER.error(e, e.getMessage());
-    }
-    IndexStorage[] blockStorage =
-        new IndexStorage[colGrpModel.getNoOfColumnStore() + noDictionaryCount + complexColCount];
-    try {
-      for (int k = 0; k < blockStorage.length; k++) {
-        blockStorage[k] = submit.get(k).get();
+    ByteBuffer byteBuffer = null;
+    byte[] measureBytes = null;
+    for (int i = 0; i < customMeasureIndex.length; i++) {
+      if (null == row[customMeasureIndex[i]]
+          && type[customMeasureIndex[i]] == CarbonCommonConstants.BIG_DECIMAL_MEASURE) {
+        measureBytes = DataTypeUtil.zeroBigDecimalBytes;
+        nullValueIndexBitSet[customMeasureIndex[i]].set(count);
+      } else {
+        if (this.compactionFlow) {
+          BigDecimal bigDecimal = ((Decimal) row[customMeasureIndex[i]]).toJavaBigDecimal();
+          measureBytes = DataTypeUtil.bigDecimalToByte(bigDecimal);
+        } else {
+          measureBytes = (byte[]) row[customMeasureIndex[i]];
+        }
       }
-    } catch (Exception e) {
-      LOGGER.error(e, e.getMessage());
+      byteBuffer = ByteBuffer.allocate(measureBytes.length +
+          CarbonCommonConstants.INT_SIZE_IN_BYTE);
+      byteBuffer.putInt(measureBytes.length);
+      byteBuffer.put(measureBytes);
+      byteBuffer.flip();
+      measureBytes = byteBuffer.array();
+      measureHolder[customMeasureIndex[i]].setWritableByteArrayValueByIndex(count, measureBytes);
     }
-    return this.dataWriter
-        .buildDataNodeHolder(blockStorage, dataHolderLocal, entryCountLocal, startkeyLocal,
-            endKeyLocal, compressionModel, noDictionaryStartKey, noDictionaryEndKey,
-            nullValueIndexBitSet);
   }
 
-  private NodeHolder getNodeHolderObjectWithOutKettle(byte[][] dataHolderLocal,
-      byte[][] byteArrayValues, int entryCountLocal, byte[] startkeyLocal, byte[] endKeyLocal,
-      WriterCompressModel compressionModel, byte[][][] noDictionaryData,
-      byte[][] noDictionaryStartKey, byte[][] noDictionaryEndKey, BitSet[] nullValueIndexBitSet)
+  private NodeHolder createNodeHolderObjectWithOutKettle(byte[][] measureArray, byte[][] mdKeyArray,
+      byte[][][] noDictionaryArray, int entryCountLocal, byte[] startkeyLocal, byte[] endKeyLocal,
+      WriterCompressModel compressionModel, byte[][] noDictionaryStartKey,
+      byte[][] noDictionaryEndKey, BitSet[] nullValueIndexBitSet)
       throws CarbonDataWriterException {
     byte[][][] noDictionaryColumnsData = null;
     List<ArrayList<byte[]>> colsAndValues = new ArrayList<ArrayList<byte[]>>();
@@ -904,19 +705,19 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
       colsAndValues.add(new ArrayList<byte[]>());
     }
     int noOfColumn = colGrpModel.getNoOfColumnStore();
-    DataHolder[] dataHolders = getDataHolders(noOfColumn, byteArrayValues.length);
-    for (int i = 0; i < byteArrayValues.length; i++) {
-      byte[][] splitKey = columnarSplitter.splitKey(byteArrayValues[i]);
+    DataHolder[] dataHolders = getDataHolders(noOfColumn, mdKeyArray.length);
+    for (int i = 0; i < mdKeyArray.length; i++) {
+      byte[][] splitKey = columnarSplitter.splitKey(mdKeyArray[i]);
 
       for (int j = 0; j < splitKey.length; j++) {
         dataHolders[j].addData(splitKey[j], i);
       }
     }
     if (noDictionaryCount > 0 || complexIndexMap.size() > 0) {
-      noDictionaryColumnsData = new byte[noDictionaryCount][noDictionaryData.length][];
-      for (int i = 0; i < noDictionaryData.length; i++) {
+      noDictionaryColumnsData = new byte[noDictionaryCount][noDictionaryArray.length][];
+      for (int i = 0; i < noDictionaryArray.length; i++) {
         int complexColumnIndex = primitiveDimLens.length + noDictionaryCount;
-        byte[][] splitKey = noDictionaryData[i];
+        byte[][] splitKey = noDictionaryArray[i];
 
         int complexTypeIndex = 0;
         for (int j = 0; j < splitKey.length; j++) {
@@ -1022,7 +823,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
           NonDictionaryUtil.packByteBufferIntoSingleByteArray(noDictionaryEndKey);
     }
     return this.dataWriter
-        .buildDataNodeHolder(blockStorage, dataHolderLocal, entryCountLocal, startkeyLocal,
+        .buildDataNodeHolder(blockStorage, measureArray, entryCountLocal, startkeyLocal,
             endKeyLocal, compressionModel, composedNonDictStartKey, composedNonDictEndKey,
             nullValueIndexBitSet);
   }
@@ -1150,10 +951,6 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
       LOGGER.info("All blocklets have been finished writing");
       // close all the open stream for both the files
       this.dataWriter.closeWriter();
-      // rename the bad record in progress to normal
-      CarbonDataProcessorUtil.renameBadRecordsFromInProgressToNormal(
-          this.databaseName + File.separator + this.tableName + File.separator + this.segmentId
-              + File.separator + this.carbonDataFileAttributes.getTaskId());
     }
     this.dataWriter = null;
     this.keyBlockHolder = null;
@@ -1182,7 +979,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     for (int i = 0; i < msrIndex.length; i++) {
       int count = msrIndex[i];
       if (row[count] != null) {
-        if (type[count] == CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE) {
+        if (type[count] == CarbonCommonConstants.DOUBLE_MEASURE) {
           double value = (double) row[count];
           double maxVal = (double) max[count];
           double minVal = (double) min[count];
@@ -1343,16 +1140,9 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
     return blockKeySizeWithComplexTypes;
   }
 
-  // TODO Remove after kettle flow got removed.
   private CarbonWriteDataHolder initialiseKeyBlockHolder(int size) {
     CarbonWriteDataHolder keyDataHolder = new CarbonWriteDataHolder();
-    keyDataHolder.initialiseByteArrayValues(size);
-    return keyDataHolder;
-  }
-
-  private CarbonWriteDataHolder initialiseKeyBlockHolderWithOutKettle(int size) {
-    CarbonWriteDataHolder keyDataHolder = new CarbonWriteDataHolder();
-    keyDataHolder.initialiseByteArrayValuesWithOutKettle(size);
+    keyDataHolder.initialiseByteArrayValuesForKey(size);
     return keyDataHolder;
   }
 
@@ -1387,9 +1177,8 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
    * @return bit set to store null value index
    */
   private BitSet[] getMeasureNullValueIndexBitSet(int measureCount) {
-    BitSet[] nullvalueIndexBitset = new BitSet[measureCount];
     // creating a bit set for all the measure column
-    nullvalueIndexBitset = new BitSet[this.measureCount];
+    BitSet[] nullvalueIndexBitset = new BitSet[measureCount];
     for (int i = 0; i < nullvalueIndexBitset.length; i++) {
       // bitset size will be blocklet size
       nullvalueIndexBitset[i] = new BitSet(this.blockletSize);
@@ -1557,12 +1346,7 @@ public class CarbonFactDataHandlerColumnar implements CarbonFactHandler {
      */
     @Override public Void call() throws Exception {
       try {
-        NodeHolder nodeHolder;
-        if (useKettle) {
-          nodeHolder = processDataRows(dataRows);
-        } else {
-          nodeHolder = processDataRowsWithOutKettle(dataRows);
-        }
+        NodeHolder nodeHolder = processDataRows(dataRows);
         // insert the object in array according to sequence number
         int indexInNodeHolderArray = (sequenceNumber - 1) % numberOfCores;
         blockletDataHolder.put(nodeHolder, indexInNodeHolderArray);

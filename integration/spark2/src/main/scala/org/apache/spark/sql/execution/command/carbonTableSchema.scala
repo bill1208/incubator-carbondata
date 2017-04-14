@@ -37,7 +37,7 @@ import org.codehaus.jackson.map.ObjectMapper
 
 import org.apache.carbondata.api.CarbonStore
 import org.apache.carbondata.common.logging.LogServiceFactory
-import org.apache.carbondata.core.cache.dictionary.ManageDictionary
+import org.apache.carbondata.core.cache.dictionary.ManageDictionaryAndBTree
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.dictionary.server.DictionaryServer
@@ -110,8 +110,6 @@ case class AlterTableCompaction(alterTableModel: AlterTableModel) extends Runnab
     carbonLoadModel.setDatabaseName(relation.tableMeta.carbonTableIdentifier.getDatabaseName)
     carbonLoadModel.setStorePath(relation.tableMeta.storePath)
 
-    val kettleHomePath = CarbonScalaUtil.getKettleHome(sparkSession.sqlContext)
-
     var storeLocation = CarbonProperties.getInstance
       .getProperty(CarbonCommonConstants.STORE_LOCATION_TEMP_PATH,
         System.getProperty("java.io.tmpdir")
@@ -123,7 +121,6 @@ case class AlterTableCompaction(alterTableModel: AlterTableModel) extends Runnab
           alterTableModel,
           carbonLoadModel,
           relation.tableMeta.storePath,
-          kettleHomePath,
           storeLocation
         )
     } catch {
@@ -283,7 +280,8 @@ object LoadTable {
 
 }
 
-case class LoadTableByInsert(relation: CarbonDatasourceHadoopRelation, child: LogicalPlan) {
+case class LoadTableByInsert(relation: CarbonDatasourceHadoopRelation, child: LogicalPlan)
+  extends RunnableCommand {
   val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
   def run(sparkSession: SparkSession): Seq[Row] = {
     val df = Dataset.ofRows(sparkSession, child)
@@ -388,29 +386,6 @@ case class LoadTable(
 
       val columnar = sparkSession.conf.get("carbon.is.columnar.storage", "true").toBoolean
 
-      // TODO It will be removed after kettle is removed.
-      val useKettle = options.get("use_kettle") match {
-        case Some(value) => value.toBoolean
-        case _ =>
-          var useKettleLocal = System.getProperty("use_kettle")
-          if (useKettleLocal == null && sparkSession.sparkContext.getConf.contains("use_kettle")) {
-            useKettleLocal = sparkSession.sparkContext.getConf.get("use_kettle")
-          }
-          if (useKettleLocal == null) {
-            useKettleLocal = CarbonProperties.getInstance().
-              getProperty(CarbonCommonConstants.USE_KETTLE,
-                CarbonCommonConstants.USE_KETTLE_DEFAULT)
-          }
-          try {
-            useKettleLocal.toBoolean
-          } catch {
-            case e: Exception => CarbonCommonConstants.USE_KETTLE_DEFAULT.toBoolean
-          }
-      }
-
-      val kettleHomePath =
-        if (useKettle) CarbonScalaUtil.getKettleHome(sparkSession.sqlContext) else ""
-
       val delimiter = options.getOrElse("delimiter", ",")
       val quoteChar = options.getOrElse("quotechar", "\"")
       val fileHeader = options.getOrElse("fileheader", "")
@@ -455,11 +430,11 @@ case class LoadTable(
           DataLoadProcessorConstants.IS_EMPTY_DATA_BAD_RECORD + "," + isEmptyDataBadRecord)
       val useOnePass = options.getOrElse("single_pass", "false").trim.toLowerCase match {
         case "true" =>
-          if (!useKettle && StringUtils.isEmpty(allDictionaryPath)) {
+          if (StringUtils.isEmpty(allDictionaryPath)) {
             true
           } else {
             LOGGER.error("Can't use single_pass, because SINGLE_PASS and ALL_DICTIONARY_PATH" +
-              "can not be used together, and USE_KETTLE must be set as false")
+              "can not be used together")
             false
           }
         case "false" =>
@@ -539,10 +514,8 @@ case class LoadTable(
           CarbonDataRDDFactory.loadCarbonData(sparkSession.sqlContext,
             carbonLoadModel,
             relation.tableMeta.storePath,
-            kettleHomePath,
             columnar,
             partitionStatus,
-            useKettle,
             result,
             dataFrame,
             updateModel)
@@ -590,10 +563,8 @@ case class LoadTable(
           CarbonDataRDDFactory.loadCarbonData(sparkSession.sqlContext,
             carbonLoadModel,
             relation.tableMeta.storePath,
-            kettleHomePath,
             columnar,
             partitionStatus,
-            useKettle,
             result,
             loadDataFrame,
             updateModel)
@@ -752,6 +723,12 @@ case class CarbonDropTableCommand(ifExistsSet: Boolean,
         sys.error("Table is locked for deletion. Please try after some time")
       }
       LOGGER.audit(s"Deleting table [$tableName] under database [$dbName]")
+      val carbonTable = CarbonEnv.get.carbonMetastore.getTableFromMetadata(dbName, tableName)
+        .map(_.carbonTable).getOrElse(null)
+      if (null != carbonTable) {
+        // clear driver B-tree and dictionary cache
+        ManageDictionaryAndBTree.clearBTreeAndDictionaryLRUCache(carbonTable)
+      }
       CarbonEnv.get.carbonMetastore.dropTable(storePath, identifier)(sparkSession)
       LOGGER.audit(s"Deleted table [$tableName] under database [$dbName]")
     } finally {

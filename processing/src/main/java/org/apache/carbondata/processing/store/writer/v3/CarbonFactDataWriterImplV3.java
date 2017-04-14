@@ -83,7 +83,7 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
    * be written in carbon data file
    */
   @Override public NodeHolder buildDataNodeHolder(IndexStorage<short[]>[] keyStorageArray,
-      byte[][] dataArray, int entryCount, byte[] startKey, byte[] endKey,
+      byte[][] measureArray, int entryCount, byte[] startKey, byte[] endKey,
       WriterCompressModel compressionModel, byte[] noDictionaryStartKey, byte[] noDictionaryEndKey,
       BitSet[] nullValueIndexBitSet) throws CarbonDataWriterException {
     // if there are no NO-Dictionary column present in the table then
@@ -113,8 +113,8 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
     byte[][] dimensionMinValue = new byte[keyStorageArray.length][];
     byte[][] dimensionMaxValue = new byte[keyStorageArray.length][];
 
-    byte[][] measureMinValue = new byte[dataArray.length][];
-    byte[][] measureMaxValue = new byte[dataArray.length][];
+    byte[][] measureMinValue = new byte[measureArray.length][];
+    byte[][] measureMaxValue = new byte[measureArray.length][];
 
     byte[][] keyBlockData = fillAndCompressedKeyBlockData(keyStorageArray, entryCount);
     boolean[] colGrpBlock = new boolean[keyStorageArray.length];
@@ -137,7 +137,7 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
         colGrpBlock[i] = true;
       }
     }
-    for (int i = 0; i < dataArray.length; i++) {
+    for (int i = 0; i < measureArray.length; i++) {
       measureMaxValue[i] = CarbonMetadataUtil
           .getByteValueForMeasure(compressionModel.getMaxValue()[i],
               dataWriterVo.getSegmentProperties().getMeasures().get(i).getDataType());
@@ -176,13 +176,13 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
     int[] msrLength = new int[dataWriterVo.getMeasureCount()];
     // calculate the total size required for all the measure and get the
     // each measure size
-    for (int i = 0; i < dataArray.length; i++) {
-      currentMsrLenght = dataArray[i].length;
+    for (int i = 0; i < measureArray.length; i++) {
+      currentMsrLenght = measureArray[i].length;
       totalMsrArrySize += currentMsrLenght;
       msrLength[i] = currentMsrLenght;
     }
     NodeHolder holder = new NodeHolder();
-    holder.setDataArray(dataArray);
+    holder.setDataArray(measureArray);
     holder.setKeyArray(keyBlockData);
     holder.setMeasureNullValueIndex(nullValueIndexBitSet);
     // end key format will be <length of dictionary key><length of no
@@ -294,7 +294,7 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
           .convertFileFooterVersion3(blockletMetadata, blockletIndex, localCardinality,
               thriftColumnSchemaList.size(), dataWriterVo.getSegmentProperties());
       // fill the carbon index details
-      fillBlockIndexInfoDetails(convertFileMeta.getNum_rows(), filePath, currentPosition);
+      fillBlockIndexInfoDetails(convertFileMeta.getNum_rows(), carbonDataFileName, currentPosition);
       // write the footer
       byte[] byteArray = CarbonUtil.getByteArray(convertFileMeta);
       ByteBuffer buffer =
@@ -476,10 +476,10 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
    * Below method will be used to fill the block info details
    *
    * @param numberOfRows    number of rows in file
-   * @param filePath        file path
+   * @param carbonDataFileName The name of carbonData file
    * @param currentPosition current offset
    */
-  protected void fillBlockIndexInfoDetails(long numberOfRows, String filePath,
+  protected void fillBlockIndexInfoDetails(long numberOfRows, String carbonDataFileName,
       long currentPosition) {
     byte[][] currentMinValue = new byte[blockletIndex.get(0).min_max_index.max_values.size()][];
     byte[][] currentMaxValue = new byte[blockletIndex.get(0).min_max_index.max_values.size()][];
@@ -528,8 +528,7 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
     org.apache.carbondata.core.metadata.blocklet.index.BlockletIndex blockletIndex =
         new org.apache.carbondata.core.metadata.blocklet.index.BlockletIndex(btree, minmax);
     BlockIndexInfo blockIndexInfo =
-        new BlockIndexInfo(numberOfRows, filePath.substring(0, filePath.lastIndexOf('.')),
-            currentPosition, blockletIndex);
+        new BlockIndexInfo(numberOfRows, carbonDataFileName, currentPosition, blockletIndex);
     blockIndexInfoList.add(blockIndexInfo);
   }
 
@@ -541,11 +540,11 @@ public class CarbonFactDataWriterImplV3 extends AbstractFactDataWriter<short[]> 
   public void closeWriter() throws CarbonDataWriterException {
     if (dataWriterHolder.getNodeHolder().size() > 0) {
       writeDataToFile(fileChannel);
-      writeBlockletInfoToFile(fileChannel, fileName);
+      writeBlockletInfoToFile(fileChannel, carbonDataFileTempPath);
       CarbonUtil.closeStreams(this.fileOutputStream, this.fileChannel);
       renameCarbonDataFile();
       copyCarbonDataFileToCarbonStorePath(
-          this.fileName.substring(0, this.fileName.lastIndexOf('.')));
+          this.carbonDataFileTempPath.substring(0, this.carbonDataFileTempPath.lastIndexOf('.')));
       try {
         writeIndexFile();
       } catch (IOException e) {

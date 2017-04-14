@@ -20,7 +20,8 @@ package org.apache.spark.sql
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical.{UnaryNode, _}
-import org.apache.spark.sql.hive.{HiveContext, HiveSessionCatalog}
+import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.hive.HiveSessionCatalog
 import org.apache.spark.sql.optimizer.CarbonDecoderRelation
 import org.apache.spark.sql.types.{StringType, TimestampType}
 
@@ -33,8 +34,22 @@ case class CarbonDictionaryCatalystDecoder(
     isOuter: Boolean,
     child: LogicalPlan) extends UnaryNode {
   // the output should be updated with converted datatype, it is need for limit+sort plan.
-  override val output: Seq[Attribute] =
-    CarbonDictionaryDecoder.convertOutput(child.output, relations, profile, aliasMap)
+  override def output: Seq[Attribute] = {
+    child match {
+      case l: LogicalRelation =>
+        // If the child is logical plan then firts update all dictionary attr with IntegerType
+        val logicalOut =
+          CarbonDictionaryDecoder.updateAttributes(child.output, relations, aliasMap)
+        CarbonDictionaryDecoder.convertOutput(logicalOut, relations, profile, aliasMap)
+      case Filter(cond, l: LogicalRelation) =>
+        // If the child is logical plan then firts update all dictionary attr with IntegerType
+        val logicalOut =
+          CarbonDictionaryDecoder.updateAttributes(child.output, relations, aliasMap)
+        CarbonDictionaryDecoder.convertOutput(logicalOut, relations, profile, aliasMap)
+      case _ => CarbonDictionaryDecoder.convertOutput(child.output, relations, profile, aliasMap)
+    }
+  }
+
 }
 
 abstract class CarbonProfile(attributes: Seq[Attribute]) extends Serializable {
@@ -74,4 +89,23 @@ case class DescribeFormattedCommand(sql: String, tblIdentifier: TableIdentifier)
 
   override def output: Seq[AttributeReference] =
     Seq(AttributeReference("result", StringType, nullable = false)())
+}
+
+/**
+ * A logical plan representing insertion into Hive table
+ * This plan ignores nullability of ArrayType, MapType, StructType unlike InsertIntoTable
+ * because Hive Table doesn't have nullability for ARRAY, MAP,STRUCT types.
+ */
+case class InsertIntoCarbonTable (table: CarbonDatasourceHadoopRelation,
+    partition: Map[String, Option[String]],
+    child: LogicalPlan,
+    overwrite: OverwriteOptions,
+    ifNotExists: Boolean)
+  extends Command {
+
+    override def output: Seq[Attribute] = Seq.empty
+
+    // This is the expected schema of the table prepared to be inserted into
+    // including dynamic partition columns.
+    val tableOutput = table.carbonRelation.output
 }

@@ -152,9 +152,12 @@ public final class DataTypeUtil {
       case LONG:
         return CarbonCommonConstants.BIG_INT_MEASURE;
       default:
-        return CarbonCommonConstants.SUM_COUNT_VALUE_MEASURE;
+        return CarbonCommonConstants.DOUBLE_MEASURE;
     }
   }
+
+  // bytes of 0 in BigDecimal
+  public static final byte[] zeroBigDecimalBytes = bigDecimalToByte(BigDecimal.valueOf(0));
 
   /**
    * This method will convert a big decimal value to bytes
@@ -324,7 +327,7 @@ public final class DataTypeUtil {
    * Below method will be used to convert the data passed to its actual data
    * type
    *
-   * @param dataInBytes    data
+   * @param dataInBytes data
    * @param dimension
    * @return actual data after conversion
    */
@@ -391,8 +394,7 @@ public final class DataTypeUtil {
           }
           java.math.BigDecimal javaDecVal = new java.math.BigDecimal(data7);
           if (dimension.getColumnSchema().getScale() > javaDecVal.scale()) {
-            javaDecVal =
-                javaDecVal.setScale(dimension.getColumnSchema().getScale());
+            javaDecVal = javaDecVal.setScale(dimension.getColumnSchema().getScale());
           }
           return org.apache.spark.sql.types.Decimal.apply(javaDecVal);
         default:
@@ -510,6 +512,9 @@ public final class DataTypeUtil {
    * @return
    */
   public static String parseValue(String value, CarbonDimension dimension) {
+    if (null == value) {
+      return null;
+    }
     try {
       switch (dimension.getDataType()) {
         case DECIMAL:
@@ -568,10 +573,10 @@ public final class DataTypeUtil {
    * Below method will be used to convert the data into byte[]
    *
    * @param data
-   * @param actualDataType actual data type
+   * @param columnSchema
    * @return actual data in byte[]
    */
-  public static byte[] convertDataToBytesBasedOnDataType(String data, DataType actualDataType) {
+  public static byte[] convertDataToBytesBasedOnDataType(String data, ColumnSchema columnSchema) {
     if (null == data) {
       return null;
     } else if (CarbonCommonConstants.MEMBER_DEFAULT_VAL.equals(data)) {
@@ -580,7 +585,7 @@ public final class DataTypeUtil {
     }
     try {
       long parsedIntVal = 0;
-      switch (actualDataType) {
+      switch (columnSchema.getDataType()) {
         case INT:
           parsedIntVal = (long) Integer.parseInt(data);
           return String.valueOf(parsedIntVal)
@@ -597,13 +602,17 @@ public final class DataTypeUtil {
               .getBytes(Charset.forName(CarbonCommonConstants.DEFAULT_CHARSET));
         case DATE:
         case TIMESTAMP:
-          DirectDictionaryGenerator directDictionaryGenerator =
-              DirectDictionaryKeyGeneratorFactory.getDirectDictionaryGenerator(actualDataType);
+          DirectDictionaryGenerator directDictionaryGenerator = DirectDictionaryKeyGeneratorFactory
+              .getDirectDictionaryGenerator(columnSchema.getDataType());
           int value = directDictionaryGenerator.generateDirectSurrogateKey(data);
           return String.valueOf(value)
               .getBytes(Charset.forName(CarbonCommonConstants.DEFAULT_CHARSET));
         case DECIMAL:
-          java.math.BigDecimal javaDecVal = new java.math.BigDecimal(data);
+          String parsedValue = parseStringToBigDecimal(data, columnSchema);
+          if (null == parsedValue) {
+            return null;
+          }
+          java.math.BigDecimal javaDecVal = new java.math.BigDecimal(parsedValue);
           return bigDecimalToByte(javaDecVal);
         default:
           return UTF8String.fromString(data).getBytes();
@@ -617,9 +626,9 @@ public final class DataTypeUtil {
   /**
    * This method will parse a given string value corresponding to its data type
    *
-   * @param value     value to parse
+   * @param value        value to parse
    * @param columnSchema dimension to get data type and precision and scale in case of decimal
-   *                  data type
+   *                     data type
    * @return
    */
   public static String normalizeColumnValueForItsDataType(String value, ColumnSchema columnSchema) {
@@ -649,10 +658,9 @@ public final class DataTypeUtil {
   }
 
   private static String parseStringToBigDecimal(String value, ColumnSchema columnSchema) {
-    BigDecimal bigDecimal = new BigDecimal(value)
-        .setScale(columnSchema.getScale(), RoundingMode.HALF_UP);
-    BigDecimal normalizedValue =
-        normalizeDecimalValue(bigDecimal, columnSchema.getPrecision());
+    BigDecimal bigDecimal =
+        new BigDecimal(value).setScale(columnSchema.getScale(), RoundingMode.HALF_UP);
+    BigDecimal normalizedValue = normalizeDecimalValue(bigDecimal, columnSchema.getPrecision());
     if (null != normalizedValue) {
       return normalizedValue.toString();
     }
